@@ -450,7 +450,7 @@ def interface():
 @click.option('-v', '--verbose', is_flag=True, help="Enable verbose output")
 def shutdown(interface_name, verbose):
     """Shut down interface"""
-    command = "ip link set {} down".format(interface_name)
+    command = "ifdown {}".format(interface_name)
     run_command(command, display_cmd=verbose)
 
 #
@@ -462,7 +462,7 @@ def shutdown(interface_name, verbose):
 @click.option('-v', '--verbose', is_flag=True, help="Enable verbose output")
 def startup(interface_name, verbose):
     """Start up interface"""
-    command = "ip link set {} up".format(interface_name)
+    command = "ifup {}".format(interface_name)
     run_command(command, display_cmd=verbose)
 
 #
