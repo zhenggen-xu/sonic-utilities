@@ -385,6 +385,12 @@ def reload(filename, yes, load_sysinfo):
     command = "{} -j {} --write-to-db".format(SONIC_CFGGEN_PATH, filename)
     run_command(command, display_cmd=True)
     client.set(config_db.INIT_INDICATOR, 1)
+
+    run_command('pfcwd start_default', display_cmd=True)
+    if os.path.isfile('/etc/sonic/acl.json'):
+        run_command("acl-loader update full /etc/sonic/acl.json", display_cmd=True)
+    run_command("config qos reload", display_cmd=True)
+
     _restart_services()
 
 @config.command()
