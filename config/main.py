@@ -288,11 +288,9 @@ def _abort_if_false(ctx, param, value):
 def _stop_services():
     services_to_stop = [
         'swss',
-        'snmp',
         'lldp',
         'pmon',
         'bgp',
-        'teamd',
         'hostcfgd',
     ]
 
@@ -339,11 +337,8 @@ def _restart_services():
         'rsyslog-config',
         'swss',
         'bgp',
-        'teamd',
         'pmon',
         'lldp',
-        'snmp',
-        'dhcp_relay',
         'hostcfgd',
     ]
 
