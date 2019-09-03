@@ -57,6 +57,7 @@ setup(
     },
     scripts=[
         'scripts/aclshow',
+        'scripts/asic_config_check',
         'scripts/boot_part',
         'scripts/coredump-compress',
         'scripts/db_migrator.py',
