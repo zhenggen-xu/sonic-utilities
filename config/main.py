@@ -17,6 +17,8 @@ from minigraph import parse_device_desc_xml
 import aaa
 import mlnx
 
+CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help', '-?'])
+
 SONIC_CFGGEN_PATH = '/usr/local/bin/sonic-cfggen'
 SYSLOG_IDENTIFIER = "config"
 
@@ -351,7 +353,7 @@ def _restart_services():
             raise
 
 # This is our main entrypoint - the main 'config' command
-@click.group()
+@click.group(context_settings=CONTEXT_SETTINGS)
 def config():
     """SONiC command line - 'config' command"""
     if os.geteuid() != 0:
