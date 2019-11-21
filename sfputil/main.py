@@ -32,7 +32,9 @@ PLATFORM_KEY = 'DEVICE_METADATA.localhost.platform'
 
 # Global platform-specific sfputil class instance
 platform_sfputil = None
-
+PLATFORM_JSON = 'platform.json'
+PORT_CONFIG_INI = 'portconfig.ini'
+PORTMAP_INI = 'portmap.ini'
 
 # ========================== Syslog wrappers ==========================
 
@@ -329,13 +331,15 @@ def get_path_to_port_config_file():
     hwsku_path = "/".join([platform_path, hwsku])
 
     # First check for the presence of the new 'port_config.ini' file
-    port_config_file_path = "/".join([hwsku_path, "port_config.ini"])
+    port_config_file_path = "/".join([hwsku_path, PLATFORM_JSON])
+    if not os.path.isfile(port_config_file_path):
+        # platform.json doesn't exist. Try loading the legacy 'port_config.ini' file
+        port_config_file_path = "/".join([hwsku_path, PORT_CONFIG_INI])
     if not os.path.isfile(port_config_file_path):
         # port_config.ini doesn't exist. Try loading the legacy 'portmap.ini' file
-        port_config_file_path = "/".join([hwsku_path, "portmap.ini"])
+        port_config_file_path = "/".join([hwsku_path, PORTMAP_INI])
 
     return port_config_file_path
-
 
 # Loads platform specific sfputil module from source
 def load_platform_sfputil():
