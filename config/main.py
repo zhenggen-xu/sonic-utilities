@@ -8,6 +8,8 @@ import subprocess
 import netaddr
 import re
 import syslog
+import time
+import netifaces
 
 import sonic_device_util
 import ipaddress
@@ -155,6 +157,61 @@ def interface_name_to_alias(interface_name):
 
     return None
 
+def get_interface_table_name(interface_name):
+    """Get table name by interface_name prefix
+    """
+    if interface_name.startswith("Ethernet"):
+        if VLAN_SUB_INTERFACE_SEPARATOR in interface_name:
+            return "VLAN_SUB_INTERFACE"
+        return "INTERFACE"
+    elif interface_name.startswith("PortChannel"):
+        if VLAN_SUB_INTERFACE_SEPARATOR in interface_name:
+            return "VLAN_SUB_INTERFACE"
+        return "PORTCHANNEL_INTERFACE"
+    elif interface_name.startswith("Vlan"):
+        return "VLAN_INTERFACE"
+    elif interface_name.startswith("Loopback"):
+        return "LOOPBACK_INTERFACE"
+    else:
+        return ""
+
+def interface_ipaddr_dependent_on_interface(config_db, interface_name):
+    """Get table keys including ipaddress
+    """
+    data = []
+    table_name = get_interface_table_name(interface_name)
+    if table_name == "":
+        return data
+    keys = config_db.get_keys(table_name)
+    for key in keys:
+        if interface_name in key and len(key) == 2:
+            data.append(key)
+    return data
+
+def is_interface_bind_to_vrf(config_db, interface_name):
+    """Get interface if bind to vrf or not
+    """
+    table_name = get_interface_table_name(interface_name)
+    if table_name == "":
+        return False
+    entry = config_db.get_entry(table_name, interface_name)
+    if entry and entry.get("vrf_name"):
+        return True
+    return False
+
+def del_interface_bind_to_vrf(config_db, vrf_name):
+    """del interface bind to vrf
+    """
+    tables = ['INTERFACE', 'PORTCHANNEL_INTERFACE', 'VLAN_INTERFACE', 'LOOPBACK_INTERFACE']
+    for table_name in tables:
+        interface_dict = config_db.get_table(table_name)
+        if interface_dict:
+            for interface_name in interface_dict.keys():
+                if interface_dict[interface_name].has_key('vrf_name') and vrf_name == interface_dict[interface_name]['vrf_name']:
+                    interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
+                    for interface_del in interface_dependent:
+                        config_db.set_entry(table_name, interface_del, None)
+                    config_db.set_entry(table_name, interface_name, None)
 
 def set_interface_naming_mode(mode):
     """Modify SONIC_CLI_IFACE_MODE env variable in user .bashrc
@@ -398,6 +455,7 @@ def _restart_services():
         'pmon',
         'lldp',
         'hostcfgd',
+        'sflow',
     ]
     if asic_type == 'mellanox' and 'pmon' in services_to_restart:
         services_to_restart.remove('pmon')
@@ -474,7 +532,7 @@ def reload(filename, yes, load_sysinfo):
     _stop_services()
     config_db = ConfigDBConnector()
     config_db.connect()
-    client = config_db.redis_clients[config_db.CONFIG_DB]
+    client = config_db.get_redis_client(config_db.CONFIG_DB)
     client.flushdb()
     if load_sysinfo:
         command = "{} -H -k {} --write-to-db".format(SONIC_CFGGEN_PATH, cfg_hwsku)
@@ -525,12 +583,22 @@ def load_minigraph():
     """Reconfigure based on minigraph."""
     log_info("'load_minigraph' executing...")
 
+    # get the device type
+    command = "{} -m -v DEVICE_METADATA.localhost.type".format(SONIC_CFGGEN_PATH)
+    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+    device_type, err = proc.communicate()
+    if err:
+        click.echo("Could not get the device type from minigraph, setting device type to Unknown")
+        device_type = 'Unknown'
+    else:
+        device_type = device_type.strip()
+
     #Stop services before config push
     _stop_services()
 
     config_db = ConfigDBConnector()
     config_db.connect()
-    client = config_db.redis_clients[config_db.CONFIG_DB]
+    client = config_db.get_redis_client(config_db.CONFIG_DB)
     client.flushdb()
     if os.path.isfile('/etc/sonic/init_cfg.json'):
         command = "{} -H -m -j /etc/sonic/init_cfg.json --write-to-db".format(SONIC_CFGGEN_PATH)
@@ -538,7 +606,8 @@ def load_minigraph():
         command = "{} -H -m --write-to-db".format(SONIC_CFGGEN_PATH)
     run_command(command, display_cmd=True)
     client.set(config_db.INIT_INDICATOR, 1)
-    run_command('pfcwd start_default', display_cmd=True)
+    if device_type != 'MgmtToRRouter':
+        run_command('pfcwd start_default', display_cmd=True)
     if os.path.isfile('/etc/sonic/acl.json'):
         run_command("acl-loader update full /etc/sonic/acl.json", display_cmd=True)
     run_command("config qos reload", display_cmd=True)
@@ -795,6 +864,13 @@ def warm_restart_teamsyncd_timer(ctx, seconds):
         ctx.fail("teamsyncd warm restart timer must be in range 1-3600")
     db.mod_entry('WARM_RESTART', 'teamd', {'teamsyncd_timer': seconds})
 
+@warm_restart.command('bgp_eoiu')
+@click.argument('enable', metavar='<enable>', default='true', required=False, type=click.Choice(["true", "false"]))
+@click.pass_context
+def warm_restart_bgp_eoiu(ctx, enable):
+    db = ctx.obj['db']
+    db.mod_entry('WARM_RESTART', 'bgp', {'bgp_eoiu': enable})
+
 #
 # 'vlan' group ('config vlan ...')
 #
@@ -815,11 +891,14 @@ def vlan(ctx, redis_unix_socket_path):
 @click.argument('vid', metavar='<vid>', required=True, type=int)
 @click.pass_context
 def add_vlan(ctx, vid):
-    db = ctx.obj['db']
-    vlan = 'Vlan{}'.format(vid)
-    if len(db.get_entry('VLAN', vlan)) != 0:
-        ctx.fail("{} already exists".format(vlan))
-    db.set_entry('VLAN', vlan, {'vlanid': vid})
+    if vid >= 1 and vid <= 4094:
+        db = ctx.obj['db']
+        vlan = 'Vlan{}'.format(vid)
+        if len(db.get_entry('VLAN', vlan)) != 0:
+            ctx.fail("{} already exists".format(vlan))
+        db.set_entry('VLAN', vlan, {'vlanid': vid})
+    else :
+        ctx.fail("Invalid VLAN ID {} (1-4094)".format(vid))
 
 @vlan.command('del')
 @click.argument('vid', metavar='<vid>', required=True, type=int)
@@ -977,6 +1056,104 @@ def vrf_del (ctx, vrfname):
         vrf_delete_management_vrf()
     else:
         click.echo("Deletion of data vrf={} is not yet supported".format(vrfname))
+
+@config.group()
+@click.pass_context
+def snmpagentaddress(ctx):
+    """SNMP agent listening IP address, port, vrf configuration"""
+    config_db = ConfigDBConnector()
+    config_db.connect()
+    ctx.obj = {'db': config_db}
+    pass
+
+@snmpagentaddress.command('add')
+@click.argument('agentip', metavar='<SNMP AGENT LISTENING IP Address>', required=True)
+@click.option('-p', '--port', help="SNMP AGENT LISTENING PORT")
+@click.option('-v', '--vrf', help="VRF Name mgmt/DataVrfName/None")
+@click.pass_context
+def add_snmp_agent_address(ctx, agentip, port, vrf):
+    """Add the SNMP agent listening IP:Port%Vrf configuration"""
+
+    #Construct SNMP_AGENT_ADDRESS_CONFIG table key in the format ip|<port>|<vrf>
+    key = agentip+'|'
+    if port:
+        key = key+port   
+    key = key+'|'
+    if vrf:
+        key = key+vrf
+    config_db = ctx.obj['db']
+    config_db.set_entry('SNMP_AGENT_ADDRESS_CONFIG', key, {})
+
+    #Restarting the SNMP service will regenerate snmpd.conf and rerun snmpd
+    cmd="systemctl restart snmp"
+    os.system (cmd)
+
+@snmpagentaddress.command('del')
+@click.argument('agentip', metavar='<SNMP AGENT LISTENING IP Address>', required=True)
+@click.option('-p', '--port', help="SNMP AGENT LISTENING PORT")
+@click.option('-v', '--vrf', help="VRF Name mgmt/DataVrfName/None")
+@click.pass_context
+def del_snmp_agent_address(ctx, agentip, port, vrf):
+    """Delete the SNMP agent listening IP:Port%Vrf configuration"""
+
+    key = agentip+'|'
+    if port:
+        key = key+port   
+    key = key+'|'
+    if vrf:
+        key = key+vrf
+    config_db = ctx.obj['db']
+    config_db.set_entry('SNMP_AGENT_ADDRESS_CONFIG', key, None)
+    cmd="systemctl restart snmp"
+    os.system (cmd)
+
+@config.group()
+@click.pass_context
+def snmptrap(ctx):
+    """SNMP Trap server configuration to send traps"""
+    config_db = ConfigDBConnector()
+    config_db.connect()
+    ctx.obj = {'db': config_db}
+    pass
+
+@snmptrap.command('modify')
+@click.argument('ver', metavar='<SNMP Version>', type=click.Choice(['1', '2', '3']), required=True)
+@click.argument('serverip', metavar='<SNMP TRAP SERVER IP Address>', required=True)
+@click.option('-p', '--port', help="SNMP Trap Server port, default 162", default="162")
+@click.option('-v', '--vrf', help="VRF Name mgmt/DataVrfName/None", default="None")
+@click.option('-c', '--comm', help="Community", default="public")
+@click.pass_context
+def modify_snmptrap_server(ctx, ver, serverip, port, vrf, comm):
+    """Modify the SNMP Trap server configuration"""
+
+    #SNMP_TRAP_CONFIG for each SNMP version
+    config_db = ctx.obj['db']
+    if ver == "1":
+        #By default, v1TrapDest value in snmp.yml is "NotConfigured". Modify it.
+        config_db.mod_entry('SNMP_TRAP_CONFIG',"v1TrapDest",{"DestIp": serverip, "DestPort": port, "vrf": vrf, "Community": comm})
+    elif ver == "2":
+        config_db.mod_entry('SNMP_TRAP_CONFIG',"v2TrapDest",{"DestIp": serverip, "DestPort": port, "vrf": vrf, "Community": comm})
+    else:
+        config_db.mod_entry('SNMP_TRAP_CONFIG',"v3TrapDest",{"DestIp": serverip, "DestPort": port, "vrf": vrf, "Community": comm})
+
+    cmd="systemctl restart snmp"
+    os.system (cmd)
+
+@snmptrap.command('del')
+@click.argument('ver', metavar='<SNMP Version>', type=click.Choice(['1', '2', '3']), required=True)
+@click.pass_context
+def delete_snmptrap_server(ctx, ver):
+    """Delete the SNMP Trap server configuration"""
+
+    config_db = ctx.obj['db']
+    if ver == "1":
+        config_db.mod_entry('SNMP_TRAP_CONFIG',"v1TrapDest",None)
+    elif ver == "2":
+        config_db.mod_entry('SNMP_TRAP_CONFIG',"v2TrapDest",None)
+    else:
+        config_db.mod_entry('SNMP_TRAP_CONFIG',"v3TrapDest",None)
+    cmd="systemctl restart snmp"
+    os.system (cmd)
 
 @vlan.group('dhcp_relay')
 @click.pass_context
@@ -1252,14 +1429,8 @@ def add(ctx, interface_name, ip_addr, gw):
 
     try:
         ipaddress.ip_network(unicode(ip_addr), strict=False)
-        if interface_name.startswith("Ethernet"):
-            if VLAN_SUB_INTERFACE_SEPARATOR in interface_name:
-                config_db.set_entry("VLAN_SUB_INTERFACE", interface_name, {"admin_status": "up"})
-                config_db.set_entry("VLAN_SUB_INTERFACE", (interface_name, ip_addr), {"NULL": "NULL"})
-            else:
-                config_db.set_entry("INTERFACE", (interface_name, ip_addr), {"NULL": "NULL"})
-                config_db.set_entry("INTERFACE", interface_name, {"NULL": "NULL"})
-        elif interface_name == 'eth0':
+
+        if interface_name == 'eth0':
 
             # Configuring more than 1 IPv4 or more than 1 IPv6 address fails.
             # Allow only one IPv4 and only one IPv6 address to be configured for IPv6.
@@ -1282,20 +1453,18 @@ def add(ctx, interface_name, ip_addr, gw):
                 config_db.set_entry("MGMT_INTERFACE", (interface_name, ip_addr), {"gwaddr": gw})
             mgmt_ip_restart_services()
 
-        elif interface_name.startswith("PortChannel"):
-            if VLAN_SUB_INTERFACE_SEPARATOR in interface_name:
-                config_db.set_entry("VLAN_SUB_INTERFACE", interface_name, {"admin_status": "up"})
-                config_db.set_entry("VLAN_SUB_INTERFACE", (interface_name, ip_addr), {"NULL": "NULL"})
-            else:
-                config_db.set_entry("PORTCHANNEL_INTERFACE", (interface_name, ip_addr), {"NULL": "NULL"})
-                config_db.set_entry("PORTCHANNEL_INTERFACE", interface_name, {"NULL": "NULL"})
-        elif interface_name.startswith("Vlan"):
-            config_db.set_entry("VLAN_INTERFACE", (interface_name, ip_addr), {"NULL": "NULL"})
-            config_db.set_entry("VLAN_INTERFACE", interface_name, {"NULL": "NULL"})
-        elif interface_name.startswith("Loopback"):
-            config_db.set_entry("LOOPBACK_INTERFACE", (interface_name, ip_addr), {"NULL": "NULL"})
-        else:
+            return
+
+        table_name = get_interface_table_name(interface_name)
+        if table_name == "":
             ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback]")
+        interface_entry = config_db.get_entry(table_name, interface_name)
+        if len(interface_entry) == 0:
+            if table_name == "VLAN_SUB_INTERFACE":
+                config_db.set_entry(table_name, interface_name, {"admin_status": "up"})
+            else:
+                config_db.set_entry(table_name, interface_name, {"NULL": "NULL"})
+        config_db.set_entry(table_name, (interface_name, ip_addr), {"NULL": "NULL"})
     except ValueError:
         ctx.fail("'ip_addr' is not valid.")
 
@@ -1315,48 +1484,252 @@ def remove(ctx, interface_name, ip_addr):
         if interface_name is None:
             ctx.fail("'interface_name' is None!")
 
-    if_table = ""
     try:
         ipaddress.ip_network(unicode(ip_addr), strict=False)
-        if interface_name.startswith("Ethernet"):
-            if VLAN_SUB_INTERFACE_SEPARATOR in interface_name:
-                config_db.set_entry("VLAN_SUB_INTERFACE", (interface_name, ip_addr), None)
-                if_table = "VLAN_SUB_INTERFACE"
-            else:
-                config_db.set_entry("INTERFACE", (interface_name, ip_addr), None)
-                if_table = "INTERFACE"
-        elif interface_name == 'eth0':
+
+        if interface_name == 'eth0':
             config_db.set_entry("MGMT_INTERFACE", (interface_name, ip_addr), None)
             mgmt_ip_restart_services()
-        elif interface_name.startswith("PortChannel"):
-            if VLAN_SUB_INTERFACE_SEPARATOR in interface_name:
-                config_db.set_entry("VLAN_SUB_INTERFACE", (interface_name, ip_addr), None)
-                if_table = "VLAN_SUB_INTERFACE"
-            else:
-                config_db.set_entry("PORTCHANNEL_INTERFACE", (interface_name, ip_addr), None)
-                if_table = "PORTCHANNEL_INTERFACE"
-        elif interface_name.startswith("Vlan"):
-            config_db.set_entry("VLAN_INTERFACE", (interface_name, ip_addr), None)
-            if_table = "VLAN_INTERFACE"
-        elif interface_name.startswith("Loopback"):
-            config_db.set_entry("LOOPBACK_INTERFACE", (interface_name, ip_addr), None)
-        else:
+            return
+
+        table_name = get_interface_table_name(interface_name)
+        if table_name == "":
             ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback]")
+        config_db.set_entry(table_name, (interface_name, ip_addr), None)
+        interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
+        if len(interface_dependent) == 0 and is_interface_bind_to_vrf(config_db, interface_name) is False:
+            config_db.set_entry(table_name, interface_name, None)
+
+        command = "ip neigh flush dev {} {}".format(interface_name, ip_addr)
+        run_command(command)
     except ValueError:
         ctx.fail("'ip_addr' is not valid.")
 
-    exists = False
-    if if_table:
-        interfaces = config_db.get_table(if_table)
-        for key in interfaces.keys():
-            if not isinstance(key, tuple):
-                continue
-            if interface_name in key:
-                exists = True
-                break
+#
+# 'vrf' subgroup ('config interface vrf ...')
+#
 
-    if not exists:
-        config_db.set_entry(if_table, interface_name, None)
+
+@interface.group()
+@click.pass_context
+def vrf(ctx):
+    """Bind or unbind VRF"""
+    pass
+
+#
+# 'bind' subcommand
+#
+@vrf.command()
+@click.argument('interface_name', metavar='<interface_name>', required=True)
+@click.argument('vrf_name', metavar='<vrf_name>', required=True)
+@click.pass_context
+def bind(ctx, interface_name, vrf_name):
+    """Bind the interface to VRF"""
+    config_db = ctx.obj["config_db"]
+    if get_interface_naming_mode() == "alias":
+        interface_name = interface_alias_to_name(interface_name)
+        if interface_name is None:
+            ctx.fail("'interface_name' is None!")
+
+    table_name = get_interface_table_name(interface_name)
+    if table_name == "":
+        ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback]")
+    if is_interface_bind_to_vrf(config_db, interface_name) is True and \
+        config_db.get_entry(table_name, interface_name).get('vrf_name') == vrf_name:
+        return
+    # Clean ip addresses if interface configured
+    interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
+    for interface_del in interface_dependent:
+        config_db.set_entry(table_name, interface_del, None)
+    config_db.set_entry(table_name, interface_name, None)
+    # When config_db del entry and then add entry with same key, the DEL will lost.
+    state_db = SonicV2Connector(host='127.0.0.1')
+    state_db.connect(state_db.STATE_DB, False)
+    _hash = '{}{}'.format('INTERFACE_TABLE|', interface_name)
+    while state_db.get(state_db.STATE_DB, _hash, "state") == "ok":
+        time.sleep(0.01)
+    state_db.close(state_db.STATE_DB)
+    config_db.set_entry(table_name, interface_name, {"vrf_name": vrf_name})
+
+#
+# 'unbind' subcommand
+#
+
+@vrf.command()
+@click.argument('interface_name', metavar='<interface_name>', required=True)
+@click.pass_context
+def unbind(ctx, interface_name):
+    """Unbind the interface to VRF"""
+    config_db = ctx.obj["config_db"]
+    if get_interface_naming_mode() == "alias":
+        interface_name = interface_alias_to_name(interface_name)
+        if interface_name is None:
+            ctx.fail("interface is None!")
+
+    table_name = get_interface_table_name(interface_name)
+    if table_name == "":
+        ctx.fail("'interface_name' is not valid. Valid names [Ethernet/PortChannel/Vlan/Loopback]")
+    if is_interface_bind_to_vrf(config_db, interface_name) is False:
+        return
+    interface_dependent = interface_ipaddr_dependent_on_interface(config_db, interface_name)
+    for interface_del in interface_dependent:
+        config_db.set_entry(table_name, interface_del, None)
+    config_db.set_entry(table_name, interface_name, None)
+
+
+#
+# 'vrf' group ('config vrf ...')
+#
+
+@config.group()
+@click.pass_context
+def vrf(ctx):
+    """VRF-related configuration tasks"""
+    config_db = ConfigDBConnector()
+    config_db.connect()
+    ctx.obj = {}
+    ctx.obj['config_db'] = config_db
+    pass
+
+@vrf.command('add')
+@click.argument('vrf_name', metavar='<vrf_name>', required=True)
+@click.pass_context
+def add_vrf(ctx, vrf_name):
+    """Add vrf"""
+    config_db = ctx.obj['config_db']
+    if not vrf_name.startswith("Vrf"):
+        ctx.fail("'vrf_name' is not start with Vrf!")
+    if len(vrf_name) > 15:
+        ctx.fail("'vrf_name' is too long!")
+    config_db.set_entry('VRF', vrf_name, {"NULL": "NULL"})
+
+@vrf.command('del')
+@click.argument('vrf_name', metavar='<vrf_name>', required=True)
+@click.pass_context
+def del_vrf(ctx, vrf_name):
+    """Del vrf"""
+    config_db = ctx.obj['config_db']
+    if not vrf_name.startswith("Vrf"):
+        ctx.fail("'vrf_name' is not start with Vrf!")
+    if len(vrf_name) > 15:
+        ctx.fail("'vrf_name' is too long!")
+    del_interface_bind_to_vrf(config_db, vrf_name)
+    config_db.set_entry('VRF', vrf_name, None)
+
+
+#
+# 'route' group ('config route ...')
+#
+
+@config.group()
+@click.pass_context
+def route(ctx):
+    """route-related configuration tasks"""
+    pass
+
+@route.command('add',context_settings={"ignore_unknown_options":True})
+@click.argument('command_str', metavar='prefix [vrf <vrf_name>] <A.B.C.D/M> nexthop <[vrf <vrf_name>] <A.B.C.D>>|<dev <dev_name>>', nargs=-1, type=click.Path())
+@click.pass_context
+def add_route(ctx, command_str):
+    """Add route command"""
+    if len(command_str) < 4 or len(command_str) > 9:
+        ctx.fail("argument is not in pattern prefix [vrf <vrf_name>] <A.B.C.D/M> nexthop <[vrf <vrf_name>] <A.B.C.D>>|<dev <dev_name>>!")
+    if "prefix" not in command_str:
+        ctx.fail("argument is incomplete, prefix not found!")
+    if "nexthop" not in command_str:
+        ctx.fail("argument is incomplete, nexthop not found!")
+    for i in range(0,len(command_str)):
+        if "nexthop" == command_str[i]:
+            prefix_str = command_str[:i]
+            nexthop_str = command_str[i:]
+    vrf_name = ""
+    cmd = 'sudo vtysh -c "configure terminal" -c "ip route'
+    if prefix_str:
+        if len(prefix_str) == 2:
+            prefix_mask = prefix_str[1]
+            cmd += ' {}'.format(prefix_mask)
+        elif len(prefix_str) == 4:
+            vrf_name = prefix_str[2]
+            prefix_mask = prefix_str[3]
+            cmd += ' {}'.format(prefix_mask)
+        else:
+            ctx.fail("prefix is not in pattern!")
+    if nexthop_str:
+        if len(nexthop_str) == 2:
+            ip = nexthop_str[1]
+            if vrf_name == "":
+                cmd += ' {}'.format(ip)
+            else:
+                cmd += ' {} vrf {}'.format(ip, vrf_name)
+        elif len(nexthop_str) == 3:
+            dev_name = nexthop_str[2]
+            if vrf_name == "":
+                cmd += ' {}'.format(dev_name)
+            else:
+                cmd += ' {} vrf {}'.format(dev_name, vrf_name)
+        elif len(nexthop_str) == 4:
+            vrf_name_dst = nexthop_str[2]
+            ip = nexthop_str[3]
+            if vrf_name == "":
+                cmd += ' {} nexthop-vrf {}'.format(ip, vrf_name_dst)
+            else:
+                cmd += ' {} vrf {} nexthop-vrf {}'.format(ip, vrf_name, vrf_name_dst)
+        else:
+            ctx.fail("nexthop is not in pattern!")
+    cmd += '"'
+    run_command(cmd)
+
+@route.command('del',context_settings={"ignore_unknown_options":True})
+@click.argument('command_str', metavar='prefix [vrf <vrf_name>] <A.B.C.D/M> nexthop <[vrf <vrf_name>] <A.B.C.D>>|<dev <dev_name>>', nargs=-1, type=click.Path())
+@click.pass_context
+def del_route(ctx, command_str):
+    """Del route command"""
+    if len(command_str) < 4 or len(command_str) > 9:
+        ctx.fail("argument is not in pattern prefix [vrf <vrf_name>] <A.B.C.D/M> nexthop <[vrf <vrf_name>] <A.B.C.D>>|<dev <dev_name>>!")
+    if "prefix" not in command_str:
+        ctx.fail("argument is incomplete, prefix not found!")
+    if "nexthop" not in command_str:
+        ctx.fail("argument is incomplete, nexthop not found!")
+    for i in range(0,len(command_str)):
+        if "nexthop" == command_str[i]:
+            prefix_str = command_str[:i]
+            nexthop_str = command_str[i:]
+    vrf_name = ""
+    cmd = 'sudo vtysh -c "configure terminal" -c "no ip route'
+    if prefix_str:
+        if len(prefix_str) == 2:
+            prefix_mask = prefix_str[1]
+            cmd += ' {}'.format(prefix_mask)
+        elif len(prefix_str) == 4:
+            vrf_name = prefix_str[2]
+            prefix_mask = prefix_str[3]
+            cmd += ' {}'.format(prefix_mask)
+        else:
+            ctx.fail("prefix is not in pattern!")
+    if nexthop_str:
+        if len(nexthop_str) == 2:
+            ip = nexthop_str[1]
+            if vrf_name == "":
+                cmd += ' {}'.format(ip)
+            else:
+                cmd += ' {} vrf {}'.format(ip, vrf_name)
+        elif len(nexthop_str) == 3:
+            dev_name = nexthop_str[2]
+            if vrf_name == "":
+                cmd += ' {}'.format(dev_name)
+            else:
+                cmd += ' {} vrf {}'.format(dev_name, vrf_name)
+        elif len(nexthop_str) == 4:
+            vrf_name_dst = nexthop_str[2]
+            ip = nexthop_str[3]
+            if vrf_name == "":
+                cmd += ' {} nexthop-vrf {}'.format(ip, vrf_name_dst)
+            else:
+                cmd += ' {} vrf {} nexthop-vrf {}'.format(ip, vrf_name, vrf_name_dst)
+        else:
+            ctx.fail("nexthop is not in pattern!")
+    cmd += '"'
+    run_command(cmd)
 
 #
 # 'acl' group ('config acl ...')
@@ -1489,6 +1862,79 @@ def incremental(file_name):
     """Incremental update of ACL rule configuration."""
     command = "acl-loader update incremental {}".format(file_name)
     run_command(command)
+
+
+#
+# 'dropcounters' group ('config dropcounters ...')
+#
+
+@config.group()
+def dropcounters():
+    """Drop counter related configuration tasks"""
+    pass
+
+
+#
+# 'install' subcommand ('config dropcounters install')
+#
+@dropcounters.command()
+@click.argument("counter_name", type=str, required=True)
+@click.argument("counter_type", type=str, required=True)
+@click.argument("reasons",      type=str, required=True)
+@click.option("-a", "--alias", type=str, help="Alias for this counter")
+@click.option("-g", "--group", type=str, help="Group for this counter")
+@click.option("-d", "--desc",  type=str, help="Description for this counter")
+@click.option('-v', '--verbose', is_flag=True, help="Enable verbose output")
+def install(counter_name, alias, group, counter_type, desc, reasons, verbose):
+    """Install a new drop counter"""
+    command = "dropconfig -c install -n '{}' -t '{}' -r '{}'".format(counter_name, counter_type, reasons)
+    if alias:
+        command += " -a '{}'".format(alias)
+    if group:
+        command += " -g '{}'".format(group)
+    if desc:
+        command += " -d '{}'".format(desc)
+
+    run_command(command, display_cmd=verbose)
+
+
+#
+# 'delete' subcommand ('config dropcounters delete')
+#
+@dropcounters.command()
+@click.argument("counter_name", type=str, required=True)
+@click.option('-v', '--verbose', is_flag=True, help="Enable verbose output")
+def delete(counter_name, verbose):
+    """Delete an existing drop counter"""
+    command = "dropconfig -c uninstall -n {}".format(counter_name)
+    run_command(command, display_cmd=verbose)
+
+
+#
+# 'add_reasons' subcommand ('config dropcounters add_reasons')
+#
+@dropcounters.command()
+@click.argument("counter_name", type=str, required=True)
+@click.argument("reasons",      type=str, required=True)
+@click.option('-v', '--verbose', is_flag=True, help="Enable verbose output")
+def add_reasons(counter_name, reasons, verbose):
+    """Add reasons to an existing drop counter"""
+    command = "dropconfig -c add -n {} -r {}".format(counter_name, reasons)
+    run_command(command, display_cmd=verbose)
+
+
+#
+# 'remove_reasons' subcommand ('config dropcounters remove_reasons')
+#
+@dropcounters.command()
+@click.argument("counter_name", type=str, required=True)
+@click.argument("reasons",      type=str, required=True)
+@click.option('-v', '--verbose', is_flag=True, help="Enable verbose output")
+def remove_reasons(counter_name, reasons, verbose):
+    """Remove reasons from an existing drop counter"""
+    command = "dropconfig -c remove -n {} -r {}".format(counter_name, reasons)
+    run_command(command, display_cmd=verbose)
+
 
 #
 # 'ecn' command ('config ecn ...')
@@ -1700,6 +2146,292 @@ def del_ntp_server(ctx, ntp_ip_address):
         run_command("systemctl restart ntp-config", display_cmd=False)
     except SystemExit as e:
         ctx.fail("Restart service ntp-config failed with error {}".format(e))
+
+#
+# 'sflow' group ('config sflow ...')
+#
+@config.group()
+@click.pass_context
+def sflow(ctx):
+    """sFlow-related configuration tasks"""
+    config_db = ConfigDBConnector()
+    config_db.connect()
+    ctx.obj = {'db': config_db}
+    pass
+
+#
+# 'sflow' command ('config sflow enable')
+#
+@sflow.command()
+@click.pass_context
+def enable(ctx):
+    """Enable sFlow"""
+    config_db = ctx.obj['db']
+    sflow_tbl = config_db.get_table('SFLOW')
+
+    if not sflow_tbl:
+        sflow_tbl = {'global': {'admin_state': 'up'}}
+    else:
+        sflow_tbl['global']['admin_state'] = 'up'
+
+    config_db.mod_entry('SFLOW', 'global', sflow_tbl['global'])
+
+#
+# 'sflow' command ('config sflow disable')
+#
+@sflow.command()
+@click.pass_context
+def disable(ctx):
+    """Disable sFlow"""
+    config_db = ctx.obj['db']
+    sflow_tbl = config_db.get_table('SFLOW')
+
+    if not sflow_tbl:
+        sflow_tbl = {'global': {'admin_state': 'down'}}
+    else:
+        sflow_tbl['global']['admin_state'] = 'down'
+
+    config_db.mod_entry('SFLOW', 'global', sflow_tbl['global'])
+
+#
+# 'sflow' command ('config sflow polling-interval ...')
+#
+@sflow.command('polling-interval')
+@click.argument('interval',  metavar='<polling_interval>', required=True,
+                type=int)
+@click.pass_context
+def polling_int(ctx, interval):
+    """Set polling-interval for counter-sampling (0 to disable)"""
+    if interval not in range(5, 301) and interval != 0:
+        click.echo("Polling interval must be between 5-300 (0 to disable)")
+
+    config_db = ctx.obj['db']
+    sflow_tbl = config_db.get_table('SFLOW')
+
+    if not sflow_tbl:
+        sflow_tbl = {'global': {'admin_state': 'down'}}
+
+    sflow_tbl['global']['polling_interval'] = interval
+    config_db.mod_entry('SFLOW', 'global', sflow_tbl['global'])
+
+def is_valid_sample_rate(rate):
+    return rate in range(256, 8388608 + 1)
+
+
+#
+# 'sflow interface' group
+#
+@sflow.group()
+@click.pass_context
+def interface(ctx):
+    """Configure sFlow settings for an interface"""
+    pass
+
+#
+# 'sflow' command ('config sflow interface enable  ...')
+#
+@interface.command()
+@click.argument('ifname', metavar='<interface_name>', required=True, type=str)
+@click.pass_context
+def enable(ctx, ifname):
+    if not interface_name_is_valid(ifname) and ifname != 'all':
+        click.echo("Invalid interface name")
+        return
+
+    config_db = ctx.obj['db']
+    intf_dict = config_db.get_table('SFLOW_SESSION')
+
+    if intf_dict and ifname in intf_dict.keys():
+        intf_dict[ifname]['admin_state'] = 'up'
+        config_db.mod_entry('SFLOW_SESSION', ifname, intf_dict[ifname])
+    else:
+        config_db.mod_entry('SFLOW_SESSION', ifname, {'admin_state': 'up'})
+
+#
+# 'sflow' command ('config sflow interface disable  ...')
+#
+@interface.command()
+@click.argument('ifname', metavar='<interface_name>', required=True, type=str)
+@click.pass_context
+def disable(ctx, ifname):
+    if not interface_name_is_valid(ifname) and ifname != 'all':
+        click.echo("Invalid interface name")
+        return
+
+    config_db = ctx.obj['db']
+    intf_dict = config_db.get_table('SFLOW_SESSION')
+
+    if intf_dict and ifname in intf_dict.keys():
+        intf_dict[ifname]['admin_state'] = 'down'
+        config_db.mod_entry('SFLOW_SESSION', ifname, intf_dict[ifname])
+    else:
+        config_db.mod_entry('SFLOW_SESSION', ifname,
+                            {'admin_state': 'down'})
+
+#
+# 'sflow' command ('config sflow interface sample-rate  ...')
+#
+@interface.command('sample-rate')
+@click.argument('ifname', metavar='<interface_name>', required=True, type=str)
+@click.argument('rate', metavar='<sample_rate>', required=True, type=int)
+@click.pass_context
+def sample_rate(ctx, ifname, rate):
+    if not interface_name_is_valid(ifname) and ifname != 'all':
+        click.echo('Invalid interface name')
+        return
+    if not is_valid_sample_rate(rate):
+        click.echo('Error: Sample rate must be between 256 and 8388608')
+        return
+
+    config_db = ctx.obj['db']
+    sess_dict = config_db.get_table('SFLOW_SESSION')
+
+    if sess_dict and ifname in sess_dict.keys():
+        sess_dict[ifname]['sample_rate'] = rate
+        config_db.mod_entry('SFLOW_SESSION', ifname, sess_dict[ifname])
+    else:
+        config_db.mod_entry('SFLOW_SESSION', ifname, {'sample_rate': rate})
+
+
+#
+# 'sflow collector' group
+#
+@sflow.group()
+@click.pass_context
+def collector(ctx):
+    """Add/Delete a sFlow collector"""
+    pass
+
+def is_valid_collector_info(name, ip, port):
+    if len(name) > 16:
+        click.echo("Collector name must not exceed 16 characters")
+        return False
+
+    if port not in range(0, 65535 + 1):
+        click.echo("Collector port number must be between 0 and 65535")
+        return False
+
+    if not is_ipaddress(ip):
+        click.echo("Invalid IP address")
+        return False
+
+    return True
+
+#
+# 'sflow' command ('config sflow collector add ...')
+#
+@collector.command()
+@click.option('--port', required=False, type=int, default=6343,
+              help='Collector port number')
+@click.argument('name', metavar='<collector_name>', required=True)
+@click.argument('ipaddr', metavar='<IPv4/v6_address>', required=True)
+@click.pass_context
+def add(ctx, name, ipaddr, port):
+    """Add a sFlow collector"""
+    ipaddr = ipaddr.lower()
+
+    if not is_valid_collector_info(name, ipaddr, port):
+        return
+
+    config_db = ctx.obj['db']
+    collector_tbl = config_db.get_table('SFLOW_COLLECTOR')
+
+    if (collector_tbl and name not in collector_tbl.keys() and len(collector_tbl) == 2):
+        click.echo("Only 2 collectors can be configured, please delete one")
+        return
+
+    config_db.mod_entry('SFLOW_COLLECTOR', name,
+                        {"collector_ip": ipaddr,  "collector_port": port})
+    return
+
+#
+# 'sflow' command ('config sflow collector del ...')
+#
+@collector.command('del')
+@click.argument('name', metavar='<collector_name>', required=True)
+@click.pass_context
+def del_collector(ctx, name):
+    """Delete a sFlow collector"""
+    config_db = ctx.obj['db']
+    collector_tbl = config_db.get_table('SFLOW_COLLECTOR')
+
+    if name not in collector_tbl.keys():
+        click.echo("Collector: {} not configured".format(name))
+        return
+
+    config_db.mod_entry('SFLOW_COLLECTOR', name, None)
+
+#
+# 'sflow agent-id' group
+#
+@sflow.group('agent-id')
+@click.pass_context
+def agent_id(ctx):
+    """Add/Delete a sFlow agent"""
+    pass
+
+#
+# 'sflow' command ('config sflow agent-id add ...')
+#
+@agent_id.command()
+@click.argument('ifname', metavar='<interface_name>', required=True)
+@click.pass_context
+def add(ctx, ifname):
+    """Add sFlow agent information"""
+    if ifname not in netifaces.interfaces():
+        click.echo("Invalid interface name")
+        return
+
+    config_db = ctx.obj['db']
+    sflow_tbl = config_db.get_table('SFLOW')
+
+    if not sflow_tbl:
+        sflow_tbl = {'global': {'admin_state': 'down'}}
+
+    if 'agent_id' in sflow_tbl['global'].keys():
+        click.echo("Agent already configured. Please delete it first.")
+        return
+
+    sflow_tbl['global']['agent_id'] = ifname
+    config_db.mod_entry('SFLOW', 'global', sflow_tbl['global'])
+
+#
+# 'sflow' command ('config sflow agent-id del')
+#
+@agent_id.command('del')
+@click.pass_context
+def delete(ctx):
+    """Delete sFlow agent information"""
+    config_db = ctx.obj['db']
+    sflow_tbl = config_db.get_table('SFLOW')
+
+    if not sflow_tbl:
+        sflow_tbl = {'global': {'admin_state': 'down'}}
+
+    if 'agent_id' not in sflow_tbl['global'].keys():
+        click.echo("sFlow agent not configured.")
+        return
+
+    sflow_tbl['global'].pop('agent_id')
+    config_db.set_entry('SFLOW', 'global', sflow_tbl['global'])
+
+#
+# 'feature' command ('config feature name state')
+# 
+@config.command('feature')
+@click.argument('name', metavar='<feature-name>', required=True)
+@click.argument('state', metavar='<feature-state>', required=True, type=click.Choice(["enabled", "disabled"]))
+def feature_status(name, state):
+    """ Configure status of feature"""
+    config_db = ConfigDBConnector()
+    config_db.connect()
+    status_data = config_db.get_entry('FEATURE', name)
+
+    if not status_data:
+        click.echo(" Feature '{}' doesn't exist".format(name))
+        return
+
+    config_db.mod_entry('FEATURE', name, {'status': state})
 
 if __name__ == '__main__':
     config()
