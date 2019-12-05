@@ -20,11 +20,37 @@ from minigraph import parse_device_desc_xml
 import aaa
 import mlnx
 
+from collections import OrderedDict
+import ast
+
+
+# import port config file path
+from sonic_daemon_base.daemon_base import DaemonBase
+from portconfig import get_port_config_file_name
+
+
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help', '-?'])
 
 SONIC_CFGGEN_PATH = '/usr/local/bin/sonic-cfggen'
 SYSLOG_IDENTIFIER = "config"
+PORT_STR = "Ethernet"
+
+
+# Regex for breakout mode
+BRKOUT_PATTERN = r'(\d{1,3})x(\d{1,3}G)(\[\d{1,3}G\])?(\((\d{1,3})\))?'
+
+""" [TODOFIX | IGNORE]: will change the logic like this
+    i.e. BREAKOUT_CFG_FILE = get_path_to_port_config_file(),
+    once the sfputil file gets compatible with platform.json
+"""
+#BREAKOUT_CFG_FILE = 'platform.json'
+
+
+(platform, hwsku) =  DaemonBase.get_platform_and_hwsku()
+BREAKOUT_CFG_FILE = get_port_config_file_name(hwsku, platform)
+
 VLAN_SUB_INTERFACE_SEPARATOR = '.'
+
 
 # ========================== Syslog wrappers ==========================
 
@@ -62,9 +88,96 @@ except KeyError, TypeError:
     raise click.Abort()
 
 #
-# Helper functions
+# Breakout Mode Helper functions
 #
 
+# Read given JSON file
+def readJsonFile(fileName):
+    try:
+        with open(fileName) as f:
+            result = json.load(f)
+    except Exception as e:
+        raise Exception(str(e))
+    return result
+
+
+def _get_child_interface_speed_dict(intf, brkout_mode, lane_len):
+    """
+    Returns list of interfaces needed to be deleted or added
+    to change from  running breakout mode to target breakout mode
+    """
+
+    try:
+        parent_intf_id = re.search("Ethernet(\d+)", intf)
+        if parent_intf_id is not None:
+            id = parent_intf_id.group(1)
+        else:
+            raise Exception("parent interface index should not be None.")
+    except re.error as e:
+        raise Exception("Invalid regular expression: {}\n Error: {}".format(e.args[0]), e)
+
+    # Logic for ASYMMETRIC breakout mode
+    if re.search("\+",brkout_mode) is not None:
+        brkout_parts = brkout_mode.split("+")
+        match_list = [re.match(BRKOUT_PATTERN, i).groups() for i in brkout_parts]
+        if match_list is not None:
+            intf_del_list = []
+            for k in match_list:
+                num_lane_used, speed, alt_speed, assigned_lane = k[0], k[1], k[2], k[4]
+                if assigned_lane and num_lane_used:
+                    if intf_del_list:
+                        intf_del_list = [PORT_STR+str(int(id)+int(i)) for i in range(0, int(assigned_lane), int(assigned_lane)/int(num_lane_used))]
+                        child_intf_dict.update(OrderedDict(( i, speed.encode("utf-8")) for i in intf_del_list))
+                    else:
+                        intf_del_list = [PORT_STR+str(int(id)+int(i)) for i in range(0, int(assigned_lane), int(assigned_lane)/int(num_lane_used))]
+                        child_intf_dict =  OrderedDict(( i, speed.encode("utf-8")) for i in intf_del_list)
+                    id = int(id) + int(str(assigned_lane))
+                else:
+                    raise Exception('Not found...')
+        else:
+            raise Exception("match_list should not be None.")
+
+    # Logic for SYMMETRIC breakout mode
+    else:
+        match_list = [re.match(BRKOUT_PATTERN, brkout_mode).groups()]
+        if match_list is not None:
+            num_lane_used = match_list[0][0]
+            if num_lane_used:
+                intf_del_list = [PORT_STR+str(int(id)+int(i)) for i in range(0,int(lane_len), int(lane_len)/int(num_lane_used))]
+            else:
+                raise Exception('Not found...')
+        else:
+            raise Exception("match_list should not be None.")
+        if intf_del_list:
+            child_intf_dict =  OrderedDict(( i, match_list[0][1]) for i in intf_del_list)
+        else:
+            raise Exception('Not Found the list of delete interfaces ')
+    return child_intf_dict
+
+
+def _get_option(ctx,args,incomplete):
+    """ Provides dynamic mode option as per user argument i.e. interface name """
+    global all_mode_options
+    interface_name = args[-1]
+
+    if not os.path.isfile(BREAKOUT_CFG_FILE) or not BREAKOUT_CFG_FILE.endswith('.json'):
+        return []
+    else:
+        breakout_file_input = readJsonFile(BREAKOUT_CFG_FILE)
+        if interface_name in breakout_file_input:
+            breakout_mode_list = [v["breakout_modes"] for i ,v in breakout_file_input.items() if i == interface_name][0]
+            breakout_mode_default = [v["default_brkout_mode"] for i ,v in breakout_file_input.items() if i == interface_name][0]
+            breakout_mode_options = []
+            for i in breakout_mode_list.split(','):
+                    breakout_mode_options.append(i)
+            all_mode_options = [str(c) for c in breakout_mode_options if incomplete in c]
+            return all_mode_options
+
+
+
+#
+# Helper functions
+#
 
 def run_command(command, display_cmd=False, ignore_error=False):
     """Run bash command and print output to stdout
@@ -1378,6 +1491,130 @@ def speed(ctx, interface_name, interface_speed, verbose):
         command += " -vv"
     run_command(command, display_cmd=verbose)
 
+#
+# 'breakout' subcommand
+#
+@interface.command()
+@click.argument('interface_name', metavar='<interface_name>', required=True)
+@click.argument('mode', required=True, type=click.STRING, autocompletion=_get_option)
+#@click.option('-f', '--force-remove-dependencies', is_flag=True,  help='Clear all depenedecies internally first.')
+#@click.option('-l', '--load-predefined-config', is_flag=True,  help='load predefied user configuration (alias, lanes, speed etc) first.')
+@click.option('-y', '--yes', is_flag=True, callback=_abort_if_false, expose_value=False, prompt='Do you want to Breakout the port, continue?')
+@click.option('-v', '--verbose', is_flag=True, help="Enable verbose output")
+@click.pass_context
+def breakout(ctx, interface_name, mode, verbose):
+
+    """ Set interface breakout mode """
+
+    if not os.path.isfile(BREAKOUT_CFG_FILE) or not BREAKOUT_CFG_FILE.endswith('.json'):
+        click.secho("[ERROR] Breakout feature is not available without platform.json file", fg='red')
+        raise click.Abort()
+
+    breakout_file_input = readJsonFile(BREAKOUT_CFG_FILE)
+    target_brkout_mode = mode
+    lane_len = len(breakout_file_input[interface_name]["lanes"].split(","))
+
+    if interface_name in breakout_file_input:
+        """ Check whether target breakout mode is available for the user-selected interface or  not"""
+        if target_brkout_mode not in breakout_file_input[interface_name]["breakout_modes"]:
+            click.secho('[ERROR] Target mode {} is not available for the port {}'. format(target_brkout_mode, interface_name), fg='red')
+            sys.exit(1)
+
+        """ Interface Deletion Logic """
+        config_db = ConfigDBConnector()
+        config_db.connect()
+        port_dict = config_db.get_table('PORT')
+        cur_brkout_dict = config_db.get_table('BREAKOUT_CFG')
+        if not port_dict:
+            click.echo("port_dict is None!")
+            raise click.Abort()
+        if interface_name in port_dict.keys():
+            cur_brkout_mode = cur_brkout_dict[interface_name]["brkout_mode"]
+            click.echo("\nRunning Breakout Mode : {} \nTarget Breakout Mode : {}".format(cur_brkout_mode, target_brkout_mode))
+            if (cur_brkout_mode == target_brkout_mode):
+                click.secho("[WARNING] No action will be taken as current and desired Breakout Mode are same.", fg='magenta')
+                sys.exit(0)
+
+            # Get list of interfaces to be deleted
+            del_intf_dict = _get_child_interface_speed_dict(interface_name, cur_brkout_mode,lane_len )
+            if del_intf_dict:
+                for intf in del_intf_dict.keys():
+                    # First, Shut down interface
+                    config_db = ctx.obj['config_db']
+                    if get_interface_naming_mode() == "alias":
+                        interface_name = interface_alias_to_name(intf)
+                        if intf is None:
+                            ctx.fail("interface name is None!")
+
+                    if interface_name_is_valid(intf) is False:
+                        ctx.fail("Interface name is invalid. Please enter a valid interface name!!")
+
+                    if intf.startswith(PORT_STR):
+                        config_db.mod_entry("PORT", intf, {"admin_status": "down"})
+                    else:
+                        click.secho("[ERROR] Could not get the correct interface name, exiting", fg='red')
+                        sys.exit(1)
+                click.echo("\nPorts to be deleted : \n {}".format(json.dumps(del_intf_dict, indent=4)))
+            else:
+                click.secho("[ERROR] del_intf_dict is None! No interfaces are there to be deleted", fg='red')
+                raise click.Abort()
+
+        """ Interface Addition Logic """
+        add_intf_dict = _get_child_interface_speed_dict(interface_name, target_brkout_mode, lane_len)
+        if add_intf_dict:
+            click.echo("Ports to be added : \n {}".format(json.dumps(add_intf_dict, indent=4)))
+        else:
+            click.secho("[ERROR] port_dict is None!", fg='red')
+            raise click.Abort()
+
+        """Special Case: Dont delete those ports  where the current mode and speed of the parent port remains unchanged
+                          to limit the traffic impact """
+
+        click.secho("\nAfter running Logic to limit the impact", fg="cyan", underline=True)
+        matched_item = [intf for intf, speed in del_intf_dict.items() if intf in add_intf_dict.keys() and speed == add_intf_dict[intf]]
+
+        # Remove the interface which remains unchanged from both del_intf_dict and add_intf_dict
+        map(del_intf_dict.pop, matched_item)
+        map(add_intf_dict.pop, matched_item)
+
+        click.secho("\nFinal list of ports to be deleted : \n {} \nFinal list of ports to be added :  \n {}".format(json.dumps(del_intf_dict, indent=4), json.dumps(add_intf_dict, indent=4), fg='green', blink=True))
+        if len(add_intf_dict.keys()) != 0:
+            ports, _ = parse_platform_json_file("platform.json", interface_name, target_brkout_mode)
+            port_dict = {}
+            for intf in add_intf_dict:
+                if intf in ports.keys():
+                    port_dict[intf] = ports[intf]
+
+            with open('new_port_config.json', 'w') as f:  # writing JSON object
+                json.dump(port_dict, f, indent=4)
+
+            """
+            Added for additional Testing. will remove Later
+            """
+            config_db = ConfigDBConnector()
+            config_db.connect()
+            for intf in port_dict.keys():
+                click.secho("before modification for port {}".format(intf),  fg="cyan", underline=True)
+                print(config_db.get_entry('PORT',intf))
+                click.secho("after modification for port {}".format(intf),  fg="cyan", underline=True)
+                config_db.mod_entry('PORT',intf, port_dict[intf])
+                print(config_db.get_entry('PORT',intf))
+
+            click.secho("PREV Breakout mode for port {}".format(interface_name),  fg="cyan", underline=True)
+            print(config_db.get_entry('BREAKOUT_CFG',interface_name))
+
+            brkout_cfg_keys = config_db.get_keys('BREAKOUT_CFG')
+            if interface_name.decode("utf-8") in  brkout_cfg_keys:
+                config_db.set_entry("BREAKOUT_CFG", interface_name,{'brkout_mode': target_brkout_mode})
+
+            click.secho("CUR Breakout mode for port {}".format(interface_name),  fg="cyan", underline=True)
+            print(config_db.get_entry('BREAKOUT_CFG',interface_name))
+
+
+    else:
+        click.secho("[ERROR] {} is not a Parent port. So, Breakout Mode is not available on this port".format(interface_name), fg='red')
+
+
 def _get_all_mgmtinterface_keys():
     """Returns list of strings containing mgmt interface keys 
     """
@@ -1399,6 +1636,7 @@ def mgmt_ip_restart_services():
     os.system (cmd)
     cmd="systemctl restart ntp-config"
     os.system (cmd)
+
 
 #
 # 'ip' subgroup ('config interface ip ...')
