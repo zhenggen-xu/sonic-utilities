@@ -25,8 +25,8 @@ import ast
 
 
 # import port config file path
-from sonic_daemon_base.daemon_base import DaemonBase
-from portconfig import get_port_config_file_name
+from sfputil.main import get_platform_and_hwsku
+from portconfig import get_port_config_file_name, parse_platform_json_file
 
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help', '-?'])
@@ -43,10 +43,9 @@ BRKOUT_PATTERN = r'(\d{1,3})x(\d{1,3}G)(\[\d{1,3}G\])?(\((\d{1,3})\))?'
     i.e. BREAKOUT_CFG_FILE = get_path_to_port_config_file(),
     once the sfputil file gets compatible with platform.json
 """
-#BREAKOUT_CFG_FILE = 'platform.json'
 
 
-(platform, hwsku) =  DaemonBase.get_platform_and_hwsku()
+(platform, hwsku) =  get_platform_and_hwsku()
 BREAKOUT_CFG_FILE = get_port_config_file_name(hwsku, platform)
 
 VLAN_SUB_INTERFACE_SEPARATOR = '.'
@@ -1579,7 +1578,7 @@ def breakout(ctx, interface_name, mode, verbose):
 
         click.secho("\nFinal list of ports to be deleted : \n {} \nFinal list of ports to be added :  \n {}".format(json.dumps(del_intf_dict, indent=4), json.dumps(add_intf_dict, indent=4), fg='green', blink=True))
         if len(add_intf_dict.keys()) != 0:
-            ports, _ = parse_platform_json_file("platform.json", interface_name, target_brkout_mode)
+            ports, _ = parse_platform_json_file(BREAKOUT_CFG_FILE, interface_name, target_brkout_mode)
             port_dict = {}
             for intf in add_intf_dict:
                 if intf in ports.keys():
