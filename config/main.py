@@ -1557,6 +1557,9 @@ def breakout(ctx, interface_name, mode, verbose):
             else:
                 click.secho("[ERROR] del_intf_dict is None! No interfaces are there to be deleted", fg='red')
                 raise click.Abort()
+        else:
+            click.secho("[ERROR] {} is not in port_dict".format(interface_name))
+            raise click.Abort()
 
         """ Interface Addition Logic """
         add_intf_dict = _get_child_interface_speed_dict(interface_name, target_brkout_mode, lane_len)
@@ -1578,7 +1581,7 @@ def breakout(ctx, interface_name, mode, verbose):
 
         click.secho("\nFinal list of ports to be deleted : \n {} \nFinal list of ports to be added :  \n {}".format(json.dumps(del_intf_dict, indent=4), json.dumps(add_intf_dict, indent=4), fg='green', blink=True))
         if len(add_intf_dict.keys()) != 0:
-            ports, _ = parse_platform_json_file(BREAKOUT_CFG_FILE, interface_name, target_brkout_mode)
+            ports = parse_platform_json_file(BREAKOUT_CFG_FILE, interface_name, target_brkout_mode)
             port_dict = {}
             for intf in add_intf_dict:
                 if intf in ports.keys():
