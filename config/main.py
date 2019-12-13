@@ -16,6 +16,7 @@ import ipaddress
 from swsssdk import ConfigDBConnector
 from swsssdk import SonicV2Connector
 from minigraph import parse_device_desc_xml
+from config_mgmt import configMgmt
 
 import aaa
 import mlnx
@@ -611,11 +612,22 @@ def save(filename):
 
 @config.command()
 @click.option('-y', '--yes', is_flag=True)
+@click.option('-c', '--verify-config', is_flag=True, help='Verify config using YANG')
 @click.argument('filename', default='/etc/sonic/config_db.json', type=click.Path(exists=True))
-def load(filename, yes):
+def load(filename, yes, verify_config):
     """Import a previous saved config DB dump file."""
     if not yes:
         click.confirm('Load config from the file %s?' % filename, abort=True)
+    # Verify config before config load
+    if verify-config:
+        try:
+            cm = configMgmt(filename)
+            if cm.validateConfigData()==False:
+                raise(Exception('Config Validation Failed'))
+        except Exception as e:
+            print(e)
+            sys.exit(1)
+
     command = "{} -j {} --write-to-db".format(SONIC_CFGGEN_PATH, filename)
     run_command(command, display_cmd=True)
 
@@ -639,6 +651,15 @@ def reload(filename, yes, load_sysinfo):
             sys.exit(1)
         else:
             cfg_hwsku = cfg_hwsku.strip()
+
+    # Verify config before stoping service
+    try:
+        cm = configMgmt(filename)
+        if cm.validateConfigData()==False:
+            raise(Exception('Config Validation Failed'))
+    except Exception as e:
+        print(e)
+        sys.exit(1)
 
     #Stop services before config push
     _stop_services()
