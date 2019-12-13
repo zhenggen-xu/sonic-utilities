@@ -513,6 +513,12 @@ if [ -x /sbin/hwclock ]; then
     /sbin/hwclock -w || /bin/true
 fi
 
+# Enable Watchdog Timer
+if [[ -x /usr/bin/watchdog ]]; then
+    debug "Enabling Watchdog before fast-reboot"
+    /usr/bin/watchdog -e
+fi
+
 # Reboot: explicity call Linux native reboot under sbin
 debug "Rebooting with ${REBOOT_METHOD} to ${NEXT_SONIC_IMAGE} ..."
 exec ${REBOOT_METHOD}
