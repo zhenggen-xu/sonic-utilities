@@ -83,7 +83,7 @@ setup(
         'scripts/queuestat',
         'scripts/reboot',
         'scripts/teamshow',
-        'scripts/nbrshow',
+        'scripts/update_json.py',
         'scripts/warm-reboot',
         'scripts/watchdog',
         'scripts/watermarkstat',
