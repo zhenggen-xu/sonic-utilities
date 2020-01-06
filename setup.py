@@ -124,7 +124,7 @@ setup(
     # - tabulate
     install_requires=[
         'click-default-group',
-        'click',
+        'click==7.0.0',
         'natsort'
     ],
     setup_requires= [
