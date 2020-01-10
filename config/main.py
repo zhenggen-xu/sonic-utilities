@@ -203,12 +203,15 @@ def add_Ports(cm, final_addPorts, port_dict, load_predefined_config, verbose):
         Sucess: True or Failure: False
     """
     try:
-        ret = cm.addPorts(ports=final_addPorts, portJson=port_dict, loadDefConfig=load_predefined_config)
+        # addPorts API expect PORT table
+        portJson = dict(); portJson['PORT'] = port_dict
+        ret = cm.addPorts(ports=final_addPorts, portJson=portJson, \
+                          loadDefConfig=load_predefined_config)
         if ret == False:
             print("[ERROR] Port Addition failed!!! Required User intervention")
             raise click.Abort()
     except Exception as e:
-        raise Exception("[ERROR] Failed to load addPorts API. Error: {}".str(e))
+        raise Exception("[ERROR] Failed to load addPorts API. Error:")
 
     print("\n*** Ports have been added successfully ***\n")
 
@@ -656,7 +659,7 @@ def load(filename, yes, verify_config):
     if not yes:
         click.confirm('Load config from the file %s?' % filename, abort=True)
     # Verify config before config load
-    if verify-config:
+    if verify_config:
         try:
             cm = configMgmt(filename)
             if cm.validateConfigData()==False:
@@ -1637,7 +1640,6 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
     with open('new_port_config.json', 'w') as f:
         json.dump(port_dict, f, indent=4)
 
-
     """ Load config for the commands which are capable of change in config DB """
     cm = load_configMgmt(verbose)
     """ Delete all ports if forced else print dependencies using configMgmt API """
@@ -1648,17 +1650,8 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
     time.sleep(5)
 
     """ Add ports with its attributes using configMgmt API """
-    final_addPorts = [intf for intf in del_intf_dict.keys()]
+    final_addPorts = [intf for intf in port_dict.keys()]
     add_Ports(cm, final_addPorts, port_dict, load_predefined_config, verbose)
-
-    """ Added for additional Testing. will remove Later """
-    for intf in port_dict.keys():
-        click.secho("before modification for port {}".format(intf),  fg="cyan", underline=True)
-        print(config_db.get_entry('PORT',intf))
-        click.secho("after modification for port {}".format(intf),  fg="cyan", underline=True)
-        config_db.mod_entry('PORT',intf, port_dict[intf])
-        print(config_db.get_entry('PORT',intf))
-    """ Added for additional Testing. Exiting!!!! """
 
     # Set Current Breakout mode in config DB
     brkout_cfg_keys = config_db.get_keys('BREAKOUT_CFG')

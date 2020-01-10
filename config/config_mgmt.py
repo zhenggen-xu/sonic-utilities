@@ -8,7 +8,7 @@ try:
     # import from sonic-cfggen, re use this
     from imp import load_source
     load_source('sonic_cfggen', '/usr/local/bin/sonic-cfggen')
-    from sonic_cfggen import deep_update, FormatConverter
+    from sonic_cfggen import deep_update, FormatConverter, sort_data
     from swsssdk import ConfigDBConnector
     from pprint import PrettyPrinter, pprint
     from json import dump, load, dumps, loads
@@ -17,7 +17,7 @@ try:
     from os import system
     from datetime import datetime
 
-    from sonic_yang import sonic_yang
+    import sonic_yang
     import re
 
 except ImportError as e:
@@ -48,13 +48,12 @@ class configMgmt():
                 with open(self.DEBUG_FILE, 'w') as df:
                     df.write('--- Start config_mgmt logging ---\n\n')
 
-            self.sy = sonic_yang(YANG_DIR)
+            self.sy = sonic_yang.sonic_yang(YANG_DIR, debug=debug)
             # load yang models
             self.sy.loadYangModel()
 
             # load jIn from config DB or from config DB json file.
-            source = source.lower()
-            if source == 'configdb':
+            if source.lower() == 'configdb':
                 self.readConfigDB()
             # treat any other source as file input
             else:
@@ -77,7 +76,7 @@ class configMgmt():
                 df.write('\n\n{}: {}\n'.format(time, header))
                 if json:
                     dump(obj, df, indent=4)
-                else:
+                elif obj:
                     #print(obj)
                     df.write('{}: {}'.format(time, obj))
                 df.write('\n----')
@@ -124,6 +123,8 @@ class configMgmt():
     def deletePorts(self, delPorts=list(), force=False):
 
         try:
+            self.logInFile("delPorts ports:{} force:{}".format(delPorts, force))
+
             print('\nStart Port Deletion')
             deps = list()
 
@@ -164,8 +165,8 @@ class configMgmt():
             self.updateDiffConfigDB()
 
         except Exception as e:
-            print("Port Deletion Failed")
             print(e)
+            print("Port Deletion Failed")
             return deps, False
 
         return None, True
@@ -183,6 +184,9 @@ class configMgmt():
     def addPorts(self, ports=list(), portJson=dict(), loadDefConfig=True):
 
         try:
+            self.logInFile("addPorts ports:{} loadDefConfig:{}".format(ports, loadDefConfig))
+            self.logInFile("addPorts Args portjson: ", portJson)
+
             print('\nStart Port Addition')
             # get default config if forced
             defConfig = dict()
@@ -218,8 +222,8 @@ class configMgmt():
             self.updateDiffConfigDB()
 
         except Exception as e:
-            print("Port Addition Failed")
             print(e)
+            print("Port Addition Failed")
             return False
 
         return True
@@ -355,6 +359,8 @@ class configMgmt():
             configdb = ConfigDBConnector(**db_kwargs)
             configdb.connect(False)
             deep_update(data, FormatConverter.to_deserialized(jDiff))
+            data = sort_data(data)
+            self.logInFile("Write in DB: Last Data", data)
             configdb.mod_config(FormatConverter.output_to_db(data))
 
             return
@@ -374,7 +380,6 @@ class configMgmt():
             #prtprint(configToLoad)
 
             #Write to Config DB now
-            self.logInFile('Writing in DB', configToLoad, json=True)
             writeConfigDB(configToLoad)
 
         except Exception as e:
@@ -508,7 +513,18 @@ class configMgmt():
 
 # end of config_mgmt class
 
-### Test Functions ###
+"""
+    Test Functions:
+    Below Test provides unit test funtionalities to test config_mgmt without
+    intergration with Python click.
+    These tests can be executed on Sonic Switch or in VS environment. User needs
+    to run these test by running this test script directly. i.e.
+    python config_mgmt.py
+
+    Prerequisite: To have a config loaded with Ethernet0 in 4X25G/1x100G/2x50G
+    mode. Also default config file must be placed at /etc/sonic.
+"""
+
 # Read given JSON file
 def readJsonFile(fileName):
     #print(fileName)
@@ -526,22 +542,90 @@ def prtprint(obj):
     prt.pprint(obj)
     return
 
-def testRun_Config_Reload_load():
+def getPortConfigDB():
+    # Read from config DB on sonic switch
+    db_kwargs = dict(); data = dict()
+    configdb = ConfigDBConnector(**db_kwargs)
+    configdb.connect()
+    deep_update(data, FormatConverter.db_to_output(configdb.get_table('PORT')))
 
-    # TODO: As of now, start from fixed config
-    startConfigFile = 'start_config_db.json'
+    return data
 
-    print('Test Run Config Reload')
-    cm = configMgmt('configDBJson')
 
-    # Validate
-    valid = cm.validateConfigData()
-    print("Data is valid: {}".format(valid))
+def testRun_Delete_Add_Port(cmode, nmode, loadDef):
 
-    return
+    ## Params for Ethernet 0, Note Test is only for one PORT
+    delPortDict = {
+        '4x25G[10G]' : ['Ethernet0', 'Ethernet1', 'Ethernet2', 'Ethernet3'],
+        '1x100G[40G]': ['Ethernet0'],
+        '2x50G': ['Ethernet0', 'Ethernet2']
+    }
 
-def testRun_Delete_Add_Ports():
+    portJsonDict = {
+        '4x25G[10G]': {
+            "PORT": {
+                "Ethernet0": {
+                    "alias": "Eth1/1",
+                    "description": "",
+                    "index": "0",
+                    "lanes": "65",
+                    "speed": "25000"
+                },
+                "Ethernet1": {
+                    "alias": "Eth1/2",
+                    "description": "",
+                    "index": "0",
+                    "lanes": "66",
+                    "speed": "25000"
+                },
+                "Ethernet2": {
+                    "alias": "Eth1/3",
+                    "description": "",
+                    "index": "0",
+                    "lanes": "67",
+                    "speed": "25000"
+                },
+                "Ethernet3": {
+                    "alias": "Eth1/4",
+                    "description": "",
+                    "index": "0",
+                    "lanes": "68",
+                    "speed": "25000"
+                }
+            }
+        },
+        '1x100G[40G]': {
+            "PORT": {
+                "Ethernet0": {
+                        "alias": "Eth1/1",
+                        "admin_status": "up",
+                        "lanes": "65,66,67,68",
+                        "description": "",
+                        "speed": "100000"
+                }
+            }
+        },
+        '2x50G': {
+            "PORT": {
+                "Ethernet0": {
+                        "alias": "Eth1/1",
+                        "admin_status": "up",
+                        "lanes": "65,66",
+                        "description": "",
+                        "speed": "50000"
+                },
+                "Ethernet2": {
+                        "alias": "Eth1/3",
+                        "admin_status": "up",
+                        "lanes": "67,68",
+                        "description": "",
+                        "speed": "50000"
+                }
+            }
+        }
+    }
 
+    # TODO: Verify config in Config DB  after writing to config DB.
     print('Test Run Delete Ports')
     try:
         cm = configMgmt('configDB', debug=True)
@@ -549,42 +633,84 @@ def testRun_Delete_Add_Ports():
         print(e)
         return
 
-    deps, ret = cm.deletePorts(delPorts=['Ethernet0', 'Ethernet1', 'Ethernet2', 'Ethernet3'], force=True)
+    delPorts = delPortDict[cmode]
+
+    deps, ret = cm.deletePorts(delPorts=delPorts, force=True)
     if ret == False:
         print("Port Deletion Test failed")
         return None
 
+    print("Verify Port Table in config DB for Deletion")
+    portTable = getPortConfigDB()
+    for port in delPorts:
+        if portTable.get(port):
+            print("Port {} is not deleted from config DB".format(port))
+            print("Port Deletion Test Failed")
+            return
+
     print("\n***Port Deletion Test Passed***\n")
 
-    portJson = {
-        "PORT": {
-            "Ethernet0": {
-                    "alias": "Eth1/1",
-                    "admin_status": "up",
-                    "lanes": "65, 66",
-                    "description": "",
-                    "speed": "50000"
-            },
-            "Ethernet2": {
-                    "alias": "Eth1/3",
-                    "admin_status": "up",
-                    "lanes": "67, 68",
-                    "description": "",
-                    "speed": "50000"
-            }
-        }
-    }
+    s = 5
+    print("Wait for {} Secs".format(s))
+    from time import sleep
+    sleep(s)
 
-    ret = cm.addPorts(ports=['Ethernet0', 'Ethernet2'], portJson=portJson)
+    ports = delPortDict[nmode]
+    portJson = portJsonDict[nmode].copy()
+
+    ret = cm.addPorts(ports=ports, portJson=portJson, loadDefConfig=loadDef)
     if ret == False:
         print("Port Addition Test failed")
         return None
+
+    # get the port list back, AddPorts may have changed them
+    print("Verify Port Table in config DB for Addition")
+    ports = delPortDict[nmode]
+    portJson = portJsonDict[nmode]
+    portTable = getPortConfigDB()
+    #print(portTable)
+    for port in ports:
+        if portJson['PORT'][port] != portTable[port]:
+            print("Port {} is not added to config DB correctly".format(port))
+            print("Port Deletion Test Failed")
+            return
 
     print("\n***Port Addition Test Passed***\n")
 
     return
 
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='Test Dy Port BreakOut Without \
+                Python click Integration',
+                formatter_class=argparse.RawTextHelpFormatter, epilog="""
+Usage:
+python config_mgmt.py --currect-mode(-c) $CUR_MODE --new-mode(-n) $NEW_MODE
+""")
+
+    parser.add_argument('-c', '--currect-mode', type=str, \
+        help='Current Mode of PORT', required=True, \
+        choices=['4x25G[10G]', '1x100G[40G]', '2x50G'])
+    parser.add_argument('-n', '--new-mode', type=str, \
+        help='New Mode of PORT', required=True, \
+        choices=['4x25G[10G]', '1x100G[40G]', '2x50G'])
+    parser.add_argument('-l', '--load-default', type=bool, \
+        help='Load Default Config if True', required=True, \
+        choices=[True, False])
+
+    args = parser.parse_args()
+
+    #fill the args
+    cmode = args.currect_mode
+    nmode = args.new_mode
+    loadDef = args.load_default
+    if cmode == nmode:
+        print("Current Mode of PORT is same as ew Mode")
+        return
+
+    testRun_Delete_Add_Port(cmode, nmode, loadDef)
+
+    return
+
 if __name__ == '__main__':
-    #testRun_Config_Reload_load()
-    testRun_Delete_Add_Ports()
-    #test_sonic_yang()
+    main()
