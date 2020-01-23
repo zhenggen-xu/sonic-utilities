@@ -14,7 +14,7 @@ import netifaces
 import sonic_device_util
 import ipaddress
 from swsssdk import ConfigDBConnector
-from swsssdk import SonicV2Connector
+from swsssdk import SonicV2Connector, port_util
 from minigraph import parse_device_desc_xml
 from config_mgmt import configMgmt
 
@@ -1642,12 +1642,54 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
 
     """ Load config for the commands which are capable of change in config DB """
     cm = load_configMgmt(verbose)
+
+    """ Save Port OIDs Mapping Before Deleting Port"""
+    dataBase = SonicV2Connector(host="127.0.0.1")
+    if_name_map, if_oid_map = port_util.get_interface_oid_map(dataBase)
+
     """ Delete all ports if forced else print dependencies using configMgmt API """
     final_delPorts = [intf for intf in del_intf_dict.keys()]
     delete_Ports(cm, final_delPorts, force_remove_dependencies, verbose)
 
-    # TODOFIX:  Check ASIC DB whether interfaces got deleted or not
-    time.sleep(5)
+    """
+     Internal Function:  Check ASIC DB whether interfaces present or not
+     ports: List of ports
+     presence: If False, Make sure Ports are not present, return False otherwise.
+               If True, Make sure Ports are present, return False otherwise.
+    """
+    def check_Ports_AsicDb(db, ports, presence, portMap):
+
+        try:
+            db.connect(db.ASIC_DB)
+            oidKey = 'ASIC_STATE:SAI_OBJECT_TYPE_PORT:oid:0x*'
+            oidDict = {oids.strip(oidKey):True for oids in \
+                db.keys('ASIC_DB', oidKey)}
+
+            for port in ports:
+                oid = portMap.get(port)
+                #print("For Testing [Check Asic DB] {}:{}".format(port, oid))
+                # If Presence == False but entry exists, return False
+                if presence == False and oidDict.get(oid):
+                    return False
+                # If Presence == True and entry does not exists, return False
+                elif presence and oidDict.get(oid) == None:
+                    return False
+        except Exception as e:
+            print(e)
+            return False
+
+        return True
+
+    MAX_WAIT = 60
+    click.secho("\nVerify Port Deletion from Asic DB, Wait...", fg="cyan")
+    for waitTime in range(MAX_WAIT):
+        if check_Ports_AsicDb(db=dataBase, ports=final_delPorts, \
+            presence=False, portMap=if_name_map):
+            break
+        if waitTime == MAX_WAIT:
+            click.secho("\nCritical Failure, Ports are not Deleted from \
+                ASIC DB, Bail Out", fg="cyan")
+        time.sleep(1)
 
     """ Add ports with its attributes using configMgmt API """
     final_addPorts = [intf for intf in port_dict.keys()]
