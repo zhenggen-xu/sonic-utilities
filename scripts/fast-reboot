@@ -515,7 +515,7 @@ fi
 
 # Enable Watchdog Timer
 if [[ -x /usr/bin/watchdog ]]; then
-    debug "Enabling Watchdog before fast-reboot"
+    debug "Enabling Watchdog before ${REBOOT_TYPE}"
     /usr/bin/watchdog -e
 fi
 
