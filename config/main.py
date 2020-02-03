@@ -652,16 +652,16 @@ def save(filename):
 
 @config.command()
 @click.option('-y', '--yes', is_flag=True)
-@click.option('-c', '--verify-config', is_flag=True, help='Verify config using YANG')
+@click.option('-d', '--disable-validation', is_flag=True, help='Disable Config Validation using YANG')
 @click.argument('filename', default='/etc/sonic/config_db.json', type=click.Path(exists=True))
-def load(filename, yes, verify_config):
+def load(filename, yes, disable_validation):
     """Import a previous saved config DB dump file."""
     if not yes:
         click.confirm('Load config from the file %s?' % filename, abort=True)
     # Verify config before config load
-    if verify_config:
+    if not disable_validation:
         try:
-            cm = configMgmt(filename)
+            cm = configMgmt(source=filename)
             if cm.validateConfigData()==False:
                 raise(Exception('Config Validation Failed'))
         except Exception as e:
@@ -673,9 +673,10 @@ def load(filename, yes, verify_config):
 
 @config.command()
 @click.option('-y', '--yes', is_flag=True)
+@click.option('-d', '--disable-validation', is_flag=True, help='Disable Config Validation using YANG')
 @click.option('-l', '--load-sysinfo', is_flag=True, help='load system default information (mac, portmap etc) first.')
 @click.argument('filename', default='/etc/sonic/config_db.json', type=click.Path(exists=True))
-def reload(filename, yes, load_sysinfo):
+def reload(filename, yes, load_sysinfo, disable_validation):
     """Clear current configuration and import a previous saved config DB dump file."""
     if not yes:
         click.confirm('Clear current config and reload config from the file %s?' % filename, abort=True)
@@ -693,13 +694,14 @@ def reload(filename, yes, load_sysinfo):
             cfg_hwsku = cfg_hwsku.strip()
 
     # Verify config before stoping service
-    try:
-        cm = configMgmt(filename)
-        if cm.validateConfigData()==False:
-            raise(Exception('Config Validation Failed'))
-    except Exception as e:
-        print(e)
-        sys.exit(1)
+    if not disable_validation:
+        try:
+            cm = configMgmt(source=filename)
+            if cm.validateConfigData()==False:
+                raise(Exception('Config Validation Failed'))
+        except Exception as e:
+            print(e)
+            sys.exit(1)
 
     #Stop services before config push
     _stop_services()
