@@ -9,13 +9,14 @@ try:
     from imp import load_source
     load_source('sonic_cfggen', '/usr/local/bin/sonic-cfggen')
     from sonic_cfggen import deep_update, FormatConverter, sort_data
-    from swsssdk import ConfigDBConnector
+    from swsssdk import ConfigDBConnector, SonicV2Connector, port_util
     from pprint import PrettyPrinter, pprint
     from json import dump, load, dumps, loads
     from sys import path as sysPath
     from os import path as osPath
     from os import system
     from datetime import datetime
+    from time import sleep as tsleep
 
     import sonic_yang
     import re
@@ -36,16 +37,18 @@ DEFAULT_CONFIG_DB_JSON_FILE = '/etc/sonic/default_config_db.json'
 
 class configMgmt():
 
-    def __init__(self, source="configDB", debug=False):
+    def __init__(self, source="configDB", debug=False, allowExtraTables=True):
 
         try:
             self.configdbJsonIn = None
             self.configdbJsonOut = None
+            self.allowExtraTables = allowExtraTables
+            self.oidKey = 'ASIC_STATE:SAI_OBJECT_TYPE_PORT:oid:0x'
 
             self.DEBUG_FILE = None
             if debug:
                 self.DEBUG_FILE = '_debug_config_mgmt'
-                with open(self.DEBUG_FILE, 'w') as df:
+                with open(self.DEBUG_FILE, 'a') as df:
                     df.write('--- Start config_mgmt logging ---\n\n')
 
             self.sy = sonic_yang.sonic_yang(YANG_DIR, debug=debug)
@@ -60,7 +63,7 @@ class configMgmt():
                 self.readConfigDBJson(source)
 
             # this will crop config, xlate and load.
-            self.sy.load_data(self.configdbJsonIn)
+            self.sy.load_data(self.configdbJsonIn, self.allowExtraTables)
 
         except Exception as e:
             print(e)
@@ -107,9 +110,145 @@ class configMgmt():
         configdb.connect()
         deep_update(data, FormatConverter.db_to_output(configdb.get_config()))
         self.configdbJsonIn =  FormatConverter.to_serialized(data)
-        self.logInFile('Reading Input', self.configdbJsonIn, True)
+        #self.logInFile('Reading Input', self.configdbJsonIn, True)
 
         return
+
+    def writeConfigDB(self, jDiff):
+        print('Writing in Config DB')
+        """
+        On Sonic Switch
+        """
+        db_kwargs = dict(); data = dict()
+        configdb = ConfigDBConnector(**db_kwargs)
+        configdb.connect(False)
+        deep_update(data, FormatConverter.to_deserialized(jDiff))
+        data = sort_data(data)
+        self.logInFile("Write in DB: Last Data\n", data)
+        configdb.mod_config(FormatConverter.output_to_db(data))
+
+        return
+
+    """
+      Check if a key exists in ASIC DB or not.
+    """
+    def checkKeyinAsicDB(key):
+
+        self.logInFile('Check Key in Asic DB: {}'.format(key))
+        try:
+            # chk key in ASIC DB
+            if db.exists('ASIC_DB', key):
+                return True
+        except Exception as e:
+            print(e)
+            raise(e)
+
+        return False
+
+    def testRedisCli(key):
+        # To Debug
+        if self.DEBUG_FILE:
+            cmd = 'sudo redis-cli -n 1 hgetall '"{}"'.format(key)
+            self.logInFile("Running {}".format(cmd))
+            print(cmd)
+            system(cmd)
+        return
+
+    """
+     Check ASIC DB for PORTs in port List
+     ports: List of ports
+     portMap: port to OID map.
+     Return: True, if all ports are not present.
+    """
+    def checkNoPortsInAsicDb(self, db, ports, portMap):
+        try:
+            # connect to ASIC DB,
+            db.connect(db.ASIC_DB)
+            for port in ports:
+                key = self.oidKey + portMap[port]
+                if checkKeyinAsicDB(key) == False:
+                    # Test again via redis-cli
+                    testRedisCli(key)
+                else:
+                    return False
+
+        except Exception as e:
+            print(e)
+            return False
+
+        return True
+
+    """
+    Verify in the Asic DB that port are deleted,
+    Keep on trying till timeout period.
+    db = database, ports, portMap, timeout
+    """
+    def verifyAsicDB(self, db, ports, portMap, timeout):
+
+        print("Verify Port Deletion from Asic DB, Wait...")
+        self.logInFile("Verify Port Deletion from Asic DB, Wait...")
+
+        try:
+            for waitTime in range(timeout):
+                self.logInFile('Check Asic DB: {} try'.format(waitTime+1))
+                # checkNoPortsInAsicDb will return True if all ports are not
+                # present in ASIC DB
+                if self.checkNoPortsInAsicDb(db, ports, portMap):
+                    break
+                tsleep(1)
+
+            # raise if timer expired
+            if waitTime + 1 == timeout:
+                print("!!!  Critical Failure, Ports are not Deleted from \
+                    ASIC DB, Bail Out  !!!")
+                self.logInFile("!!!  Critical Failure, Ports are not Deleted from \
+                    ASIC DB, Bail Out  !!!")
+                raise(Exception("Ports are present in ASIC DB after timeout"))
+
+        except Exception as e:
+            print(e)
+            raise e
+
+        return True
+
+    def breakOutPort(self, delPorts=list(), addPorts= list(), portJson=dict(), \
+        force=False, loadDefConfig=True):
+
+        MAX_WAIT = 60
+        try:
+            # delete Port and get the Config diff, deps and True/False
+            delConfigToLoad, deps, ret = self.deletePorts(ports=delPorts, \
+                force=force)
+            # return dependencies if delete port fails
+            if ret == False:
+                return deps, ret
+
+            # add Ports and get the config diff and True/False
+            addConfigtoLoad, ret = self.addPorts(ports=addPorts, \
+                portJson=portJson, loadDefConfig=loadDefConfig)
+            # return if ret is False, Great thing, no change is done in Config
+            if ret == False:
+                return None, ret
+
+            # Save Port OIDs Mapping Before Deleting Port
+            dataBase = SonicV2Connector(host="127.0.0.1")
+            if_name_map, if_oid_map = port_util.get_interface_oid_map(dataBase)
+            self.logInFile('if_name_map', obj=if_name_map, json=True)
+
+            # If we are here, then get ready to update the Config DB, Update
+            # deletion of Config first, then verify in Asic DB for port deletion,
+            # then update addition of ports in config DB.
+            self.writeConfigDB(delConfigToLoad)
+            # Verify in Asic DB,
+            self.verifyAsicDB(db=dataBase, ports=delPorts, portMap=if_name_map, \
+                timeout=MAX_WAIT)
+            self.writeConfigDB(addConfigtoLoad)
+
+        except Exception as e:
+            print(e)
+            return None, False
+
+        return None, True
 
     """
     Delete all ports.
@@ -120,27 +259,30 @@ class configMgmt():
     WithOut Force: (xpath of dependecies, False) or (None, True)
     With Force: (xpath of dependecies, False) or (None, True)
     """
-    def deletePorts(self, delPorts=list(), force=False):
+    def deletePorts(self, ports=list(), force=False):
 
+        configToLoad = None; deps = None
         try:
-            self.logInFile("delPorts ports:{} force:{}".format(delPorts, force))
+            self.logInFile("delPorts ports:{} force:{}".format(ports, force))
 
             print('\nStart Port Deletion')
             deps = list()
 
             # Get all dependecies for ports
-            for port in delPorts:
+            for port in ports:
                 xPathPort = self.sy.findXpathPortLeaf(port)
                 print('Find dependecies for port {}'.format(port))
+                self.logInFile('Find dependecies for port {}'.format(port))
                 # print("Generated Xpath:" + xPathPort)
                 dep = self.sy.find_data_dependencies(str(xPathPort))
                 if dep:
                     deps.extend(dep)
             self.logInFile('Dependencies', deps)
 
+
             # No further action with no force and deps exist
             if force == False and deps:
-                return deps, False;
+                return configToLoad, deps, False;
 
             # delets all deps, No topological sort is needed as of now, if deletion
             # of deps fails, return immediately
@@ -148,9 +290,11 @@ class configMgmt():
                 for dep in deps:
                     self.logInFile('Deleting', dep)
                     self.sy.delete_node(str(dep))
+            # mark deps as None now,
+            deps = None
 
             # all deps are deleted now, delete all ports now
-            for port in delPorts:
+            for port in ports:
                 xPathPort = self.sy.findXpathPort(port)
                 print("Deleting Port: " + port)
                 self.logInFile('Deleting Port:{}'.format(port), xPathPort)
@@ -158,18 +302,19 @@ class configMgmt():
 
             # Let`s Validate the tree now
             if self.validateConfigData()==False:
-                return None, False
+                return configToLoad, deps, False;
 
-            # All great if we are here, Lets get the diff and update Config
+            # All great if we are here, Lets get the diff
             self.configdbJsonOut = self.sy.get_data()
-            self.updateDiffConfigDB()
+            # Update configToLoad
+            configToLoad = self.updateDiffConfigDB()
 
         except Exception as e:
             print(e)
             print("Port Deletion Failed")
-            return deps, False
+            return configToLoad, deps, False
 
-        return None, True
+        return configToLoad, deps, True
 
     """
     Add Ports and default config for ports to config DB, after validation of
@@ -183,7 +328,9 @@ class configMgmt():
     """
     def addPorts(self, ports=list(), portJson=dict(), loadDefConfig=True):
 
+        configToLoad = None
         try:
+            self.logInFile('\nStart Port Addition')
             self.logInFile("addPorts ports:{} loadDefConfig:{}".format(ports, loadDefConfig))
             self.logInFile("addPorts Args portjson: ", portJson)
 
@@ -196,11 +343,6 @@ class configMgmt():
                     defConfig, json=True)
             #prtprint(defConfig)
 
-            # Merge PortJson and default config
-            portJson.update(defConfig)
-            defConfig = None
-            #prtprint(portJson)
-
             # get the latest Data Tree, save this in input config, since this
             # is our starting point now
             self.configdbJsonIn = self.sy.get_data()
@@ -209,24 +351,30 @@ class configMgmt():
             if self.configdbJsonOut is None:
                 self.configdbJsonOut = self.sy.get_data()
 
-            # merge new config with data tree, this is json level merge
-            print("Merge Port Config for {}".format(ports))
-            self.mergeConfigs(self.configdbJsonOut, portJson)
+            # update portJson in configdbJsonOut PORT part
+            self.configdbJsonOut['PORT'].update(portJson['PORT'])
+            # merge new config with data tree, this is json level merge.
+            # We do not allow new table merge while adding default config.
+            if loadDefConfig:
+                print("Merge Default Config for {}".format(ports))
+                self.logInFile("Merge Default Config for {}".format(ports))
+                self.mergeConfigs(self.configdbJsonOut, defConfig, True)
+
             # create a tree with merged config and validate, if validation is
             # sucessful, then configdbJsonOut contains final and valid config.
-            self.sy.load_data(self.configdbJsonOut)
+            self.sy.load_data(self.configdbJsonOut, self.allowExtraTables)
             if self.validateConfigData()==False:
-                return False
+                return configToLoad, False
 
             # All great if we are here, Let`s get the diff and update COnfig
-            self.updateDiffConfigDB()
+            configToLoad = self.updateDiffConfigDB()
 
         except Exception as e:
             print(e)
             print("Port Addition Failed")
-            return False
+            return configToLoad, False
 
-        return True
+        return configToLoad, True
 
     """
     Validate current Data Tree
@@ -236,17 +384,20 @@ class configMgmt():
         try:
             self.sy.validate_data_tree()
         except Exception as e:
+            self.logInFile('Data Validation Failed')
             return False
 
         print('Data Validation successful')
+        self.logInFile('Data Validation successful')
         return True
 
     """
     Merge second dict in first, Note both first and second dict will be changed
     First Dict will have merged part D1 + D2
     Second dict will have D2 - D1 [unique keys in D2]
+    Unique keys in D2 will be merged in D1 only if uniqueKeys=True
     """
-    def mergeConfigs(self, D1, D2):
+    def mergeConfigs(self, D1, D2, uniqueKeys=True):
 
         try:
             def mergeItems(it1, it2):
@@ -274,8 +425,9 @@ class configMgmt():
                 else:
                     pass
 
-            # merge rest of the keys in D1
-            D1.update(D2)
+            # if uniqueKeys are needed, merge rest of the keys of D2 in D1
+            if uniqueKeys:
+                D1.update(D2)
         except Exce as e:
             print("Merge Config failed")
             print(e)
@@ -349,45 +501,24 @@ class configMgmt():
 
     def updateDiffConfigDB(self):
 
-        ### Internal Functions ###
-        def writeConfigDB(jDiff):
-            print('Writing in Config DB')
-            """
-            On Sonic Switch
-            """
-            db_kwargs = dict(); data = dict()
-            configdb = ConfigDBConnector(**db_kwargs)
-            configdb.connect(False)
-            deep_update(data, FormatConverter.to_deserialized(jDiff))
-            data = sort_data(data)
-            self.logInFile("Write in DB: Last Data", data)
-            configdb.mod_config(FormatConverter.output_to_db(data))
-
-            return
-
         # main code starts here
+        configToLoad = dict()
         try:
             # Get the Diff
             print('Generate Final Config to write in DB')
             configDBdiff = self.diffJson()
-            #print("\n***Config Diff***\n")
-            #prtprint(configDBdiff)
 
             # Process diff and create Config which can be updated in Config DB
             configToLoad = self.createConfigToLoad(configDBdiff, \
                 self.configdbJsonIn, self.configdbJsonOut)
-            #print("\n***Config To Load***\n")
-            #prtprint(configToLoad)
-
-            #Write to Config DB now
-            writeConfigDB(configToLoad)
+            self.logInFile("Config Diff to Load: {}", configToLoad, True)
 
         except Exception as e:
             print("Update to Config DB Failed")
             print(e)
             raise e
 
-        return
+        return configToLoad
 
     """
     Create the config to write in Config DB from json diff
