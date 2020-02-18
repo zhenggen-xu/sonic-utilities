@@ -148,7 +148,7 @@ class configMgmt():
     def testRedisCli(key):
         # To Debug
         if self.DEBUG_FILE:
-            cmd = 'sudo redis-cli -n 1 hgetall '"{}"'.format(key)
+            cmd = 'sudo redis-cli -n 1 hgetall "{}"'.format(key)
             self.logInFile("Running {}".format(cmd))
             print(cmd)
             system(cmd)
