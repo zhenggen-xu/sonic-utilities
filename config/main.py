@@ -28,6 +28,7 @@ import ast
 # import port config file path
 from sfputil.main import get_platform_and_hwsku
 from portconfig import get_port_config_file_name, parse_platform_json_file
+from portconfig import get_child_ports
 
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help', '-?'])
@@ -131,7 +132,7 @@ def shutdown_interfaces(ctx, del_intf_dict):
 
 def _validate_interface_mode(ctx, BREAKOUT_CFG_FILE, interface_name, target_brkout_mode, cur_brkout_mode):
     """ Validate Parent interface and user selected mode before starting deletetion or addition process """
-    breakout_file_input = readJsonFile(BREAKOUT_CFG_FILE)
+    breakout_file_input = readJsonFile(BREAKOUT_CFG_FILE)["interfaces"]
 
     if interface_name not in breakout_file_input:
         click.secho("[ERROR] {} is not a Parent port. So, Breakout Mode is not available on this port".format(interface_name), fg='red')
@@ -1227,7 +1228,7 @@ def add_snmp_agent_address(ctx, agentip, port, vrf):
     #Construct SNMP_AGENT_ADDRESS_CONFIG table key in the format ip|<port>|<vrf>
     key = agentip+'|'
     if port:
-        key = key+port   
+        key = key+port
     key = key+'|'
     if vrf:
         key = key+vrf
@@ -1248,7 +1249,7 @@ def del_snmp_agent_address(ctx, agentip, port, vrf):
 
     key = agentip+'|'
     if port:
-        key = key+port   
+        key = key+port
     key = key+'|'
     if vrf:
         key = key+vrf
@@ -1567,7 +1568,8 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
 
     """ Interface Deletion Logic """
     # Get list of interfaces to be deleted
-    del_ports = parse_platform_json_file(BREAKOUT_CFG_FILE, interface_name, target_brkout_mode=cur_brkout_mode)
+    del_ports = get_child_ports(interface_name, cur_brkout_mode, BREAKOUT_CFG_FILE)
+    del_intf_dict = {intf: del_ports[intf]["speed"] for intf in del_ports}
     del_intf_dict = {intf: del_ports[intf]["speed"] for intf in del_ports}
 
     if del_intf_dict:
@@ -1584,7 +1586,7 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
 
     """ Interface Addition Logic """
     # Get list of interfaces to be added
-    add_ports = parse_platform_json_file(BREAKOUT_CFG_FILE, interface_name, target_brkout_mode=target_brkout_mode)
+    add_ports = get_child_ports(interface_name, target_brkout_mode, BREAKOUT_CFG_FILE)
     add_intf_dict = {intf: add_ports[intf]["speed"] for intf in add_ports}
 
     if add_intf_dict:
@@ -1650,7 +1652,7 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
 
 
 def _get_all_mgmtinterface_keys():
-    """Returns list of strings containing mgmt interface keys 
+    """Returns list of strings containing mgmt interface keys
     """
     config_db = ConfigDBConnector()
     config_db.connect()
@@ -2390,7 +2392,7 @@ def add_ntp_server(ctx, ntp_ip_address):
     if ntp_ip_address in ntp_servers:
         click.echo("NTP server {} is already configured".format(ntp_ip_address))
         return
-    else: 
+    else:
         db.set_entry('NTP_SERVER', ntp_ip_address, {'NULL': 'NULL'})
         click.echo("NTP server {} added to configuration".format(ntp_ip_address))
         try:
@@ -2411,7 +2413,7 @@ def del_ntp_server(ctx, ntp_ip_address):
     if ntp_ip_address in ntp_servers:
         db.set_entry('NTP_SERVER', '{}'.format(ntp_ip_address), None)
         click.echo("NTP server {} removed from configuration".format(ntp_ip_address))
-    else: 
+    else:
         ctx.fail("NTP server {} is not configured.".format(ntp_ip_address))
     try:
         click.echo("Restarting ntp-config service...")
@@ -2689,7 +2691,7 @@ def delete(ctx):
 
 #
 # 'feature' command ('config feature name state')
-# 
+#
 @config.command('feature')
 @click.argument('name', metavar='<feature-name>', required=True)
 @click.argument('state', metavar='<feature-state>', required=True, type=click.Choice(["enabled", "disabled"]))
