@@ -28,6 +28,7 @@ import ast
 # import port config file path
 from sfputil.main import get_platform_and_hwsku
 from portconfig import get_port_config_file_name, parse_platform_json_file
+from portconfig import get_child_ports
 
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help', '-?'])
@@ -131,7 +132,7 @@ def shutdown_interfaces(ctx, del_intf_dict):
 
 def _validate_interface_mode(ctx, BREAKOUT_CFG_FILE, interface_name, target_brkout_mode, cur_brkout_mode):
     """ Validate Parent interface and user selected mode before starting deletetion or addition process """
-    breakout_file_input = readJsonFile(BREAKOUT_CFG_FILE)
+    breakout_file_input = readJsonFile(BREAKOUT_CFG_FILE)["interfaces"]
 
     if interface_name not in breakout_file_input:
         click.secho("[ERROR] {} is not a Parent port. So, Breakout Mode is not available on this port".format(interface_name), fg='red')
@@ -164,57 +165,32 @@ def _validate_interface_mode(ctx, BREAKOUT_CFG_FILE, interface_name, target_brko
 def load_configMgmt(verbose):
     """ Load config for the commands which are capable of change in config DB. """
     try:
-        cm = configMgmt(debug=verbose)
+        # TODO: set allowExtraTables to False, i.e we should have yang models for
+        # each table in Config. [TODO: Create Yang model for each Table]
+        # cm = configMgmt(debug=verbose, allowExtraTables=False)
+        cm = configMgmt(debug=verbose, allowExtraTables=True)
         return cm
     except Exception as e:
-        raise Exception("Failed to load the config. Error: {}".str(e))
+        raise Exception("Failed to load the config. Error: {}".format(str(e)))
 
+def breakout_Ports(cm, delPorts=list(), addPorts=list(), portJson=dict(), \
+    force=False, loadDefConfig=True, verbose=False):
 
-def delete_Ports(cm, final_delPorts,force_remove_dependencies, verbose):
-    """
-    Delete all ports.
-    del_ports: list of port names.
-    force_remove_dependencies: if false return dependecies, else delete dependencies.
-    Return:
-        WithOut Force: (xpath of dependecies, False) or (None, True)
-        With Force: (xpath of dependecies, False) or (None, True)
-    """
-    deps, ret = cm.deletePorts(delPorts=final_delPorts, force=force_remove_dependencies)
-    # No further action with no force and deps exist
-    if not force_remove_dependencies:
-        if ret == False and deps:
+    deps, ret = cm.breakOutPort(delPorts=delPorts, addPorts = addPorts, \
+                    portJson=portJson, force=force, loadDefConfig=loadDefConfig)
+    # check if DPB failed
+    if ret == False:
+        if not force and deps:
             print("Dependecies Exist. No further action will be taken")
-            print("\n*** Printing dependecies ***\n {}".format(deps))
+            print("*** Printing dependecies ***")
+            for dep in deps:
+                print(dep)
             sys.exit(0)
-    if ret == False and deps:
-        print("[ERROR] Port Deletion failed!!! Opting Out")
-        raise click.Abort()
-
-    print("\n*** Ports have been deleted successfully ***\n")
-
-
-def add_Ports(cm, final_addPorts, port_dict, load_predefined_config, verbose):
-    """
-    Add Ports and default config for ports to config DB, after validation of data tree.
-    add_ports : list of ports
-    port_dict : Config DB Json Part of all Ports same as PORT Table of Config DB.
-    load_predefined_config : If True, add default config as well.
-    return:
-        Sucess: True or Failure: False
-    """
-    try:
-        # addPorts API expect PORT table
-        portJson = dict(); portJson['PORT'] = port_dict
-        ret = cm.addPorts(ports=final_addPorts, portJson=portJson, \
-                          loadDefConfig=load_predefined_config)
-        if ret == False:
-            print("[ERROR] Port Addition failed!!! Required User intervention")
+        else:
+            print("[ERROR] Port breakout Failed!!! Opting Out")
             raise click.Abort()
-    except Exception as e:
-        raise Exception("[ERROR] Failed to load addPorts API. Error:")
 
-    print("\n*** Ports have been added successfully ***\n")
-
+        return
 #
 # Helper functions
 #
@@ -652,16 +628,16 @@ def save(filename):
 
 @config.command()
 @click.option('-y', '--yes', is_flag=True)
-@click.option('-c', '--verify-config', is_flag=True, help='Verify config using YANG')
+@click.option('-d', '--disable-validation', is_flag=True, help='Disable Config Validation using YANG')
 @click.argument('filename', default='/etc/sonic/config_db.json', type=click.Path(exists=True))
-def load(filename, yes, verify_config):
+def load(filename, yes, disable_validation):
     """Import a previous saved config DB dump file."""
     if not yes:
         click.confirm('Load config from the file %s?' % filename, abort=True)
     # Verify config before config load
-    if verify_config:
+    if not disable_validation:
         try:
-            cm = configMgmt(filename)
+            cm = configMgmt(source=filename)
             if cm.validateConfigData()==False:
                 raise(Exception('Config Validation Failed'))
         except Exception as e:
@@ -673,9 +649,10 @@ def load(filename, yes, verify_config):
 
 @config.command()
 @click.option('-y', '--yes', is_flag=True)
+@click.option('-d', '--disable-validation', is_flag=True, help='Disable Config Validation using YANG')
 @click.option('-l', '--load-sysinfo', is_flag=True, help='load system default information (mac, portmap etc) first.')
 @click.argument('filename', default='/etc/sonic/config_db.json', type=click.Path(exists=True))
-def reload(filename, yes, load_sysinfo):
+def reload(filename, yes, load_sysinfo, disable_validation):
     """Clear current configuration and import a previous saved config DB dump file."""
     if not yes:
         click.confirm('Clear current config and reload config from the file %s?' % filename, abort=True)
@@ -693,13 +670,14 @@ def reload(filename, yes, load_sysinfo):
             cfg_hwsku = cfg_hwsku.strip()
 
     # Verify config before stoping service
-    try:
-        cm = configMgmt(filename)
-        if cm.validateConfigData()==False:
-            raise(Exception('Config Validation Failed'))
-    except Exception as e:
-        print(e)
-        sys.exit(1)
+    if not disable_validation:
+        try:
+            cm = configMgmt(source=filename)
+            if cm.validateConfigData()==False:
+                raise(Exception('Config Validation Failed'))
+        except Exception as e:
+            print(e)
+            sys.exit(1)
 
     #Stop services before config push
     _stop_services()
@@ -1250,7 +1228,7 @@ def add_snmp_agent_address(ctx, agentip, port, vrf):
     #Construct SNMP_AGENT_ADDRESS_CONFIG table key in the format ip|<port>|<vrf>
     key = agentip+'|'
     if port:
-        key = key+port   
+        key = key+port
     key = key+'|'
     if vrf:
         key = key+vrf
@@ -1271,7 +1249,7 @@ def del_snmp_agent_address(ctx, agentip, port, vrf):
 
     key = agentip+'|'
     if port:
-        key = key+port   
+        key = key+port
     key = key+'|'
     if vrf:
         key = key+vrf
@@ -1590,7 +1568,8 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
 
     """ Interface Deletion Logic """
     # Get list of interfaces to be deleted
-    del_ports = parse_platform_json_file(BREAKOUT_CFG_FILE, interface_name, target_brkout_mode=cur_brkout_mode)
+    del_ports = get_child_ports(interface_name, cur_brkout_mode, BREAKOUT_CFG_FILE)
+    del_intf_dict = {intf: del_ports[intf]["speed"] for intf in del_ports}
     del_intf_dict = {intf: del_ports[intf]["speed"] for intf in del_ports}
 
     if del_intf_dict:
@@ -1607,7 +1586,7 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
 
     """ Interface Addition Logic """
     # Get list of interfaces to be added
-    add_ports = parse_platform_json_file(BREAKOUT_CFG_FILE, interface_name, target_brkout_mode=target_brkout_mode)
+    add_ports = get_child_ports(interface_name, target_brkout_mode, BREAKOUT_CFG_FILE)
     add_intf_dict = {intf: add_ports[intf]["speed"] for intf in add_ports}
 
     if add_intf_dict:
@@ -1640,30 +1619,40 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
     with open('new_port_config.json', 'w') as f:
         json.dump(port_dict, f, indent=4)
 
-    """ Load config for the commands which are capable of change in config DB """
-    cm = load_configMgmt(verbose)
-    """ Delete all ports if forced else print dependencies using configMgmt API """
-    final_delPorts = [intf for intf in del_intf_dict.keys()]
-    delete_Ports(cm, final_delPorts, force_remove_dependencies, verbose)
+    # Start Interation with Dy Port BreakOut Config Mgmt
+    try:
+        """ Load config for the commands which are capable of change in config DB """
+        cm = load_configMgmt(verbose)
 
-    # TODOFIX:  Check ASIC DB whether interfaces got deleted or not
-    time.sleep(5)
+        """ Delete all ports if forced else print dependencies using configMgmt API """
+        final_delPorts = [intf for intf in del_intf_dict.keys()]
+        """ Add ports with its attributes using configMgmt API """
+        final_addPorts = [intf for intf in port_dict.keys()]
+        portJson = dict(); portJson['PORT'] = port_dict
+        # breakout_Ports will abort operation on failure, So no need to check return
+        breakout_Ports(cm, delPorts=final_delPorts, addPorts = final_addPorts, \
+            portJson=portJson, force=force_remove_dependencies, \
+            loadDefConfig=load_predefined_config, verbose=verbose)
 
-    """ Add ports with its attributes using configMgmt API """
-    final_addPorts = [intf for intf in port_dict.keys()]
-    add_Ports(cm, final_addPorts, port_dict, load_predefined_config, verbose)
+        # Set Current Breakout mode in config DB
+        brkout_cfg_keys = config_db.get_keys('BREAKOUT_CFG')
+        if interface_name.decode("utf-8") not in  brkout_cfg_keys:
+            click.secho("[ERROR] {} is not present in 'BREAKOUT_CFG' Table!".\
+                format(interface_name), fg='red')
+            raise click.Abort()
+        config_db.set_entry("BREAKOUT_CFG", interface_name,\
+            {'brkout_mode': target_brkout_mode})
+        click.secho("Breakout process got successfully completed.".\
+            format(interface_name),  fg="cyan", underline=True)
 
-    # Set Current Breakout mode in config DB
-    brkout_cfg_keys = config_db.get_keys('BREAKOUT_CFG')
-    if interface_name.decode("utf-8") not in  brkout_cfg_keys:
-        click.secho("[ERROR] {} is not present in 'BREAKOUT_CFG' Table!".format(interface_name), fg='red')
-        raise click.Abort()
-    config_db.set_entry("BREAKOUT_CFG", interface_name,{'brkout_mode': target_brkout_mode})
-    click.secho("Breakout process got successfully completed.".format(interface_name),  fg="cyan", underline=True)
+    except Exception as e:
+        click.secho("Failed to break out Port. Error: {}".format(str(e)), \
+            fg='magenta')
+        sys.exit(0)
 
 
 def _get_all_mgmtinterface_keys():
-    """Returns list of strings containing mgmt interface keys 
+    """Returns list of strings containing mgmt interface keys
     """
     config_db = ConfigDBConnector()
     config_db.connect()
@@ -2403,7 +2392,7 @@ def add_ntp_server(ctx, ntp_ip_address):
     if ntp_ip_address in ntp_servers:
         click.echo("NTP server {} is already configured".format(ntp_ip_address))
         return
-    else: 
+    else:
         db.set_entry('NTP_SERVER', ntp_ip_address, {'NULL': 'NULL'})
         click.echo("NTP server {} added to configuration".format(ntp_ip_address))
         try:
@@ -2424,7 +2413,7 @@ def del_ntp_server(ctx, ntp_ip_address):
     if ntp_ip_address in ntp_servers:
         db.set_entry('NTP_SERVER', '{}'.format(ntp_ip_address), None)
         click.echo("NTP server {} removed from configuration".format(ntp_ip_address))
-    else: 
+    else:
         ctx.fail("NTP server {} is not configured.".format(ntp_ip_address))
     try:
         click.echo("Restarting ntp-config service...")
@@ -2702,7 +2691,7 @@ def delete(ctx):
 
 #
 # 'feature' command ('config feature name state')
-# 
+#
 @config.command('feature')
 @click.argument('name', metavar='<feature-name>', required=True)
 @click.argument('state', metavar='<feature-state>', required=True, type=click.Choice(["enabled", "disabled"]))
