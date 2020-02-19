@@ -132,7 +132,7 @@ class configMgmt():
     """
       Check if a key exists in ASIC DB or not.
     """
-    def checkKeyinAsicDB(key):
+    def checkKeyinAsicDB(self, key, db):
 
         self.logInFile('Check Key in Asic DB: {}'.format(key))
         try:
@@ -145,7 +145,7 @@ class configMgmt():
 
         return False
 
-    def testRedisCli(key):
+    def testRedisCli(self, key):
         # To Debug
         if self.DEBUG_FILE:
             cmd = 'sudo redis-cli -n 1 hgetall "{}"'.format(key)
@@ -166,9 +166,9 @@ class configMgmt():
             db.connect(db.ASIC_DB)
             for port in ports:
                 key = self.oidKey + portMap[port]
-                if checkKeyinAsicDB(key) == False:
+                if self.checkKeyinAsicDB(key, db) == False:
                     # Test again via redis-cli
-                    testRedisCli(key)
+                    self.testRedisCli(key)
                 else:
                     return False
 
