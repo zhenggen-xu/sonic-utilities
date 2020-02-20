@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import ipaddress
 
 import click
 from click_default_group import DefaultGroup
@@ -188,7 +189,7 @@ def get_routing_stack():
 routing_stack = get_routing_stack()
 
 
-def run_command(command, display_cmd=False):
+def run_command(command, display_cmd=False, return_cmd=False):
     if display_cmd:
         click.echo(click.style("Command: ", fg='cyan') + click.style(command, fg='green'))
 
@@ -201,6 +202,9 @@ def run_command(command, display_cmd=False):
     proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
 
     while True:
+        if return_cmd:
+            output = proc.communicate()[0].decode("utf-8")
+            return output
         output = proc.stdout.readline()
         if output == "" and proc.poll() is not None:
             break
@@ -391,6 +395,146 @@ def run_command_in_alias_mode(command):
     rc = process.poll()
     if rc != 0:
         sys.exit(rc)
+
+
+def get_bgp_summary_extended(command_output):
+    """
+    Adds Neighbor name to the show ip[v6] bgp summary command
+    :param command: command to get bgp summary
+    """
+    static_neighbors, dynamic_neighbors = get_bgp_neighbors_dict()
+    modified_output = []
+    my_list = iter(command_output.splitlines())
+    for element in my_list:
+        if element.startswith("Neighbor"):
+            element = "{}\tNeighborName".format(element)
+            modified_output.append(element)
+        elif not element or element.startswith("Total number "):
+            modified_output.append(element)
+        elif re.match(r"(\*?([0-9A-Fa-f]{1,4}:|\d+.\d+.\d+.\d+))", element.split()[0]):
+            first_element = element.split()[0]
+            ip = first_element[1:] if first_element.startswith("*") else first_element
+            name = get_bgp_neighbor_ip_to_name(ip, static_neighbors, dynamic_neighbors)
+            if len(element.split()) == 1:
+                modified_output.append(element)
+                element = next(my_list)
+            element = "{}\t{}".format(element, name)
+            modified_output.append(element)
+        else:
+            modified_output.append(element)
+    click.echo("\n".join(modified_output))
+
+
+def connect_config_db():
+    """
+    Connects to config_db
+    """
+    config_db = ConfigDBConnector()
+    config_db.connect()
+    return config_db
+
+
+def get_neighbor_dict_from_table(db,table_name):
+    """
+    returns a dict with bgp neighbor ip as key and neighbor name as value
+    :param table_name: config db table name
+    :param db: config_db
+    """
+    neighbor_dict = {}
+    neighbor_data = db.get_table(table_name)
+    try:
+        for entry in neighbor_data.keys():
+            neighbor_dict[entry] = neighbor_data[entry].get(
+                'name') if 'name' in neighbor_data[entry].keys() else 'NotAvailable'
+        return neighbor_dict
+    except:
+        return neighbor_dict
+
+
+def is_ipv4_address(ipaddress):
+    """
+    Checks if given ip is ipv4
+    :param ipaddress: unicode ipv4
+    :return: bool
+    """
+    try:
+        ipaddress.IPv4Address(ipaddress)
+        return True
+    except ipaddress.AddressValueError as err:
+        return False
+
+
+def is_ipv6_address(ipaddress):
+    """
+    Checks if given ip is ipv6
+    :param ipaddress: unicode ipv6
+    :return: bool
+    """
+    try:
+        ipaddress.IPv6Address(ipaddress)
+        return True
+    except ipaddress.AddressValueError as err:
+        return False
+
+
+def get_dynamic_neighbor_subnet(db):
+    """
+    Returns dict of description and subnet info from bgp_peer_range table
+    :param db: config_db
+    """
+    dynamic_neighbor = {}
+    v4_subnet = {}
+    v6_subnet = {}
+    neighbor_data = db.get_table('BGP_PEER_RANGE')
+    try:
+        for entry in neighbor_data.keys():
+            new_key = neighbor_data[entry]['ip_range'][0]
+            new_value = neighbor_data[entry]['name']
+            if is_ipv4_address(unicode(neighbor_data[entry]['src_address'])):
+                v4_subnet[new_key] = new_value
+            elif is_ipv6_address(unicode(neighbor_data[entry]['src_address'])):
+                v6_subnet[new_key] = new_value
+        dynamic_neighbor["v4"] = v4_subnet
+        dynamic_neighbor["v6"] = v6_subnet
+        return dynamic_neighbor
+    except:
+        return neighbor_data
+
+
+def get_bgp_neighbors_dict():
+    """
+    Uses config_db to get the bgp neighbors and names in dictionary format
+    :return:
+    """
+    dynamic_neighbors = {}
+    config_db = connect_config_db()
+    static_neighbors = get_neighbor_dict_from_table(config_db, 'BGP_NEIGHBOR')
+    bgp_monitors = get_neighbor_dict_from_table(config_db, 'BGP_MONITORS')
+    static_neighbors.update(bgp_monitors)
+    dynamic_neighbors = get_dynamic_neighbor_subnet(config_db)
+    return static_neighbors, dynamic_neighbors
+
+
+def get_bgp_neighbor_ip_to_name(ip, static_neighbors, dynamic_neighbors):
+    """
+    return neighbor name for the ip provided
+    :param ip: ip address unicode
+    :param static_neighbors: statically defined bgp neighbors dict
+    :param dynamic_neighbors: subnet of dynamically defined neighbors dict
+    :return: name of neighbor
+    """
+    if ip in static_neighbors.keys():
+        return static_neighbors[ip]
+    elif is_ipv4_address(unicode(ip)):
+        for subnet in dynamic_neighbors["v4"].keys():
+            if ipaddress.IPv4Address(unicode(ip)) in ipaddress.IPv4Network(unicode(subnet)):
+                return dynamic_neighbors["v4"][subnet]
+    elif is_ipv6_address(unicode(ip)):
+        for subnet in dynamic_neighbors["v6"].keys():
+            if ipaddress.IPv6Address(unicode(ip)) in ipaddress.IPv6Network(unicode(subnet)):
+                return dynamic_neighbors["v6"][subnet]
+    else:
+        return "NotAvailable"
 
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help', '-?'])
@@ -2447,9 +2591,134 @@ def config(redis_unix_socket_path):
     state_db.close(state_db.STATE_DB)
 
 #
-# show features
+# 'nat' group ("show nat ...")
 #
 
+@cli.group(cls=AliasedGroup, default_if_no_args=False)
+def nat():
+    """Show details of the nat """
+    pass
+
+# 'statistics' subcommand ("show nat statistics")
+@nat.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def statistics(verbose):
+    """ Show NAT statistics """
+
+    cmd = "sudo natshow -s"
+    run_command(cmd, display_cmd=verbose)
+
+# 'translations' subcommand ("show nat translations")
+@nat.group(invoke_without_command=True)
+@click.pass_context
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def translations(ctx, verbose):
+    """ Show NAT translations """
+
+    if ctx.invoked_subcommand is None:
+        cmd = "sudo natshow -t"
+        run_command(cmd, display_cmd=verbose)
+
+# 'count' subcommand ("show nat translations count")
+@translations.command()
+def count():
+    """ Show NAT translations count """
+
+    cmd = "sudo natshow -c"
+    run_command(cmd)
+
+# 'config' subcommand ("show nat config")
+@nat.group(invoke_without_command=True)
+@click.pass_context
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def config(ctx, verbose):
+    """Show NAT config related information"""
+    if ctx.invoked_subcommand is None:
+        click.echo("\nGlobal Values")
+        cmd = "sudo natconfig -g"
+        run_command(cmd, display_cmd=verbose)
+        click.echo("Static Entries")
+        cmd = "sudo natconfig -s"
+        run_command(cmd, display_cmd=verbose)
+        click.echo("Pool Entries")
+        cmd = "sudo natconfig -p"
+        run_command(cmd, display_cmd=verbose)
+        click.echo("NAT Bindings")
+        cmd = "sudo natconfig -b"
+        run_command(cmd, display_cmd=verbose)
+        click.echo("NAT Zones")
+        cmd = "sudo natconfig -z"
+        run_command(cmd, display_cmd=verbose)
+
+# 'static' subcommand  ("show nat config static")
+@config.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def static(verbose):
+    """Show static NAT configuration"""
+
+    cmd = "sudo natconfig -s"
+    run_command(cmd, display_cmd=verbose)
+
+# 'pool' subcommand  ("show nat config pool")
+@config.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def pool(verbose):
+    """Show NAT Pool configuration"""
+
+    cmd = "sudo natconfig -p"
+    run_command(cmd, display_cmd=verbose)
+
+
+# 'bindings' subcommand  ("show nat config bindings")
+@config.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def bindings(verbose):
+    """Show NAT binding configuration"""
+
+    cmd = "sudo natconfig -b"
+    run_command(cmd, display_cmd=verbose)
+
+# 'globalvalues' subcommand  ("show nat config globalvalues")
+@config.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def globalvalues(verbose):
+    """Show NAT Global configuration"""
+
+    cmd = "sudo natconfig -g"
+    run_command(cmd, display_cmd=verbose)
+
+# 'zones' subcommand  ("show nat config zones")
+@config.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def zones(verbose):
+    """Show NAT Zone configuration"""
+
+    cmd = "sudo natconfig -z"
+    run_command(cmd, display_cmd=verbose)
+
+#
+# 'ztp status' command ("show ztp status")
+#
+@cli.command()
+@click.argument('status', required=False, type=click.Choice(["status"]))
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def ztp(status, verbose):
+    """Show Zero Touch Provisioning status"""
+    if os.path.isfile('/usr/bin/ztp') is False:
+        exit("ZTP feature unavailable in this image version")
+
+    if os.geteuid() != 0:
+        exit("Root privileges are required for this operation")
+    pass
+
+    cmd = "ztp status"
+    if verbose:
+       cmd = cmd + " --verbose"
+    run_command(cmd, display_cmd=verbose)
+
+#
+# show features
+#
 @cli.command('features')
 def features():
     """Show status of optional features"""
