@@ -37,6 +37,7 @@ CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help', '-?'])
 SONIC_CFGGEN_PATH = '/usr/local/bin/sonic-cfggen'
 SYSLOG_IDENTIFIER = "config"
 PORT_STR = "Ethernet"
+INTF_KEY = "interfaces"
 
 (platform, hwsku) =  get_platform_and_hwsku()
 BREAKOUT_CFG_FILE = get_port_config_file_name(hwsku, platform)
@@ -101,9 +102,8 @@ def _get_option(ctx,args,incomplete):
         return []
     else:
         breakout_file_input = readJsonFile(BREAKOUT_CFG_FILE)
-        if interface_name in breakout_file_input:
-            breakout_mode_list = [v["breakout_modes"] for i ,v in breakout_file_input.items() if i == interface_name][0]
-            breakout_mode_default = [v["default_brkout_mode"] for i ,v in breakout_file_input.items() if i == interface_name][0]
+        if interface_name in breakout_file_input[INTF_KEY]:
+            breakout_mode_list = [v["breakout_modes"] for i ,v in breakout_file_input[INTF_KEY].items() if i == interface_name][0]
             breakout_mode_options = []
             for i in breakout_mode_list.split(','):
                     breakout_mode_options.append(i)
