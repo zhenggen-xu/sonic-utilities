@@ -331,7 +331,7 @@ def get_path_to_port_config_file():
     hwsku_path = "/".join([platform_path, hwsku])
 
     # First check for the presence of the new 'port_config.ini' file
-    port_config_file_path = "/".join([hwsku_path, PLATFORM_JSON])
+    port_config_file_path = "/".join([platform_path, PLATFORM_JSON])
     if not os.path.isfile(port_config_file_path):
         # platform.json doesn't exist. Try loading the legacy 'port_config.ini' file
         port_config_file_path = "/".join([hwsku_path, PORT_CONFIG_INI])
