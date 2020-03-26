@@ -1131,6 +1131,30 @@ def counters(verbose):
 
     run_command(cmd, display_cmd=verbose)
 
+# 'pfcwd' subcommand ("show pfcwd...")
+@cli.group(cls=AliasedGroup, default_if_no_args=False)
+def pfcwd():
+    """Show details of the pfc watchdog """
+    pass
+
+@pfcwd.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def config(verbose):
+    """Show pfc watchdog config"""
+
+    cmd = "pfcwd show config"
+
+    run_command(cmd, display_cmd=verbose)
+
+@pfcwd.command()
+@click.option('--verbose', is_flag=True, help="Enable verbose output")
+def stats(verbose):
+    """Show pfc watchdog stats"""
+
+    cmd = "pfcwd show stats"
+
+    run_command(cmd, display_cmd=verbose)
+
 # 'naming_mode' subcommand ("show interfaces naming_mode")
 @interfaces.command()
 @click.option('--verbose', is_flag=True, help="Enable verbose output")
@@ -1757,6 +1781,27 @@ def ssdhealth(device, verbose, vendor):
     options = " -v" if verbose else ""
     options += " -e" if vendor else ""
     run_command(cmd + options, display_cmd=verbose)
+
+# 'fan' subcommand ("show platform fan")
+@platform.command()
+def fan():
+    """Show fan status information"""
+    cmd = 'fanshow'
+    run_command(cmd)
+
+# 'temperature' subcommand ("show platform temperature")
+@platform.command()
+def temperature():
+    """Show device temperature information"""
+    cmd = 'tempershow'
+    run_command(cmd)
+
+# 'firmware' subcommand ("show platform firmware")
+@platform.command()
+def firmware():
+    """Show firmware status information"""
+    cmd = "fwutil show status"
+    run_command(cmd)
 
 #
 # 'logging' command ("show logging")
@@ -2817,6 +2862,41 @@ def features():
     status_data = config_db.get_table('FEATURE')
     for key in status_data.keys():
         body.append([key, status_data[key]['status']])
+    click.echo(tabulate(body, header))
+
+#
+# 'container' group (show container ...)
+#
+@cli.group(name='container', invoke_without_command=False)
+def container():
+    """Show container"""
+    pass
+
+#
+# 'feature' group (show container feature ...)
+#
+@container.group(name='feature', invoke_without_command=False)
+def feature():
+    """Show container feature"""
+    pass
+
+#
+# 'autorestart' subcommand (show container feature autorestart)
+#
+@feature.command('autorestart', short_help="Show whether the auto-restart feature for container(s) is enabled or disabled")
+@click.argument('container_name', required=False)
+def autorestart(container_name):
+    config_db = ConfigDBConnector()
+    config_db.connect()
+    header = ['Container Name', 'Status']
+    body = []
+    container_feature_table = config_db.get_table('CONTAINER_FEATURE')
+    if container_name:
+        if container_feature_table and container_feature_table.has_key(container_name):
+            body.append([container_name, container_feature_table[container_name]['auto_restart']])
+    else:
+        for name in container_feature_table.keys():
+            body.append([name, container_feature_table[name]['auto_restart']])
     click.echo(tabulate(body, header))
 
 if __name__ == '__main__':
