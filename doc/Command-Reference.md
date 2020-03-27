@@ -31,6 +31,9 @@
 * [BGP](#bgp)
   * [BGP show commands](#bgp-show-commands)
   * [BGP config commands](#bgp-config-commands)
+* [Container Auto-restart](#container-autorestart-commands)
+  * [Container Auto-restart show commands](#container-autorestart-show-commands)
+  * [Container Auto-restart config command](#container-autorestart-config-command)
 * [DHCP Relay](#dhcp-relay)
   * [DHCP Relay config commands](#dhcp-relay-config-commands)
 * [Drop Counters](#drop-counters)
@@ -67,6 +70,10 @@
 * [NTP](#ntp)
   * [NTP show commands](#ntp-show-commands)
   * [NTP config commands](#ntp-config-commands)
+* [PFC Watchdog Commands](#pfc-watchdog-commands)
+* [Platform Component Firmware](#platform-component-firmware)
+  * [Platform Component Firmware show commands](#platform-component-firmware-show-commands)
+  * [Platform Component Firmware config commands](#platform-component-firmware-config-commands)
 * [Platform Specific Commands](#platform-specific-commands)
 * [PortChannels](#portchannels)
   * [PortChannel Show commands](#portchannel-show-commands)
@@ -102,7 +109,6 @@
 * [Troubleshooting Commands](#troubleshooting-commands)
 * [Routing Stack](#routing-stack)
 * [Quagga BGP Show Commands](#Quagga-BGP-Show-Commands)
-
 
 ## Document History
 
@@ -261,6 +267,7 @@ This command lists all the possible configuration commands at the top level.
     vlan                   VLAN-related configuration tasks
     warm_restart           warm_restart-related configuration tasks
     watermark              Configure watermark
+    container              Modify configuration of containers
   ```
 Go Back To [Beginning of the document](#) or [Beginning of this section](#getting-help)
 
@@ -322,6 +329,7 @@ This command displays the full list of show commands available in the software; 
     vlan                  Show VLAN information
     warm_restart          Show warm restart configuration and state
     watermark             Show details of watermark
+    container             Show details of container
   ```
 
 The same syntax applies to all subgroups of `show` which themselves contain subcommands, and subcommands which accept options/arguments.
@@ -1726,6 +1734,63 @@ This command is used to remove particular IPv4 or IPv6 BGP neighbor configuratio
   ```
 
 Go Back To [Beginning of the document](#) or [Beginning of this section](#bgp)
+
+## Container Auto-restart
+SONiC includes a feature in which Docker containers can be automatically shut
+down and restarted if one of critical processes running in the container exits
+unexpectedly. Restarting the entire container ensures that configureation is 
+reloaded and all processes in the container get restarted, thus increasing the
+likelihood of entering a healthy state.
+
+### Container Auto-restart show commands
+
+**show container feature autorestart**
+
+This command will display the status of auto-restart feature for containers.
+
+- Usage:
+  ```
+  show container feature autorestart [<container_name>]
+  ```
+
+- Example:
+  ```
+  admin@sonic:~$ show container feature autorestart
+  Container Name    Status
+  --------------    --------
+  database          enabled
+  syncd             enabled
+  teamd             disabled
+  dhcp_relay        enabled
+  lldp              enabled
+  pmon              enabled
+  bgp               enabled
+  swss              disabled
+  telemetry         enabled
+  sflow             enabled
+  snmp              enabled
+  radv              disabled
+  ```
+
+Optionally, you can specify a container name in order to display the auto-restart
+feature status for that container only.
+
+### Container Auto-restart config command
+
+**config container feature autorestart <container_name> <autorestart_status>**
+
+This command will configure the status of auto-restart feature for a specific container.
+
+- Usage:
+  ```
+  sudo config container feature autorestart <container_name> (enabled | disabled)
+  ```
+
+- Example:
+  ```
+  admin@sonic:~$ sudo config container feature autorestart database disabled
+  ``` 
+Go Back To [Beginning of the document](#) or [Beginning of this section](#container-autorestart-commands)
 
 ## DHCP Relay
 
@@ -3464,6 +3529,259 @@ This command is used to delete a configured NTP server IP address.
   ```
 
 Go Back To [Beginning of the document](#) or [Beginning of this section](#NTP)
+
+# PFC Watchdog Commands
+Detailed description of the PFC Watchdog could be fount on the [this wiki page](https://github.com/Azure/SONiC/wiki/PFC-Watchdog)
+
+**config pfcwd start \<arguments\>**
+
+This command starts PFC Watchdog
+
+- Usage:
+  ```
+  config pfcwd start --action drop ports all detection-time 400 --restoration-time 400
+  config pfcwd start --action forward ports Ethernet0 Ethernet8 detection-time 400
+  ```
+
+**config pfcwd stop**
+
+This command stops PFC Watchdog
+
+- Usage:
+  ```
+  config pfcwd stop
+  ```
+
+**config pfcwd interval \<interval_in_ms\>**
+
+This command sets PFC Watchdog counter polling interval (in ms)
+
+- Usage:
+  ```
+  config pfcwd interval 200
+  ```
+
+**config pfcwd counter_poll \<enable/disable\>**
+
+This command enables or disables PFCWD related counters polling
+
+- Usage:
+  ```
+  config pfcwd counter_poll disable
+  ```
+
+**config pfcwd big_red_switch \<enable/disable\>**
+
+This command enables or disables PFCWD's "BIG RED SWITCH"(BRS). After enabling BRS PFC Watchdog will be activated on all ports/queues it is configured for no matter whether the storm was detected or not
+
+- Usage:
+  ```
+  config pfcwd big_red_switch enable
+  ```
+
+**config pfcwd start_default**
+
+This command starts PFC Watchdog with the default settings.
+
+- Usage:
+  ```
+  config pfcwd start_default
+  ```
+
+Default values are the following:  
+
+   - detection time - 200ms
+   - restoration time - 200ms
+   - polling interval - 200ms
+   - action - 'drop'
+
+Additionally if number of ports in the system exceeds 32, all times will be multiplied by roughly <num_ports\>/32.
+
+
+**show pfcwd config**
+
+This command shows current PFC Watchdog configuration
+
+- Usage:
+  ```
+  show pfcwd config
+  ```
+
+**show pfcwd stats**
+
+This command shows current PFC Watchdog statistics (storms detected, packets dropped, etc)
+
+- Usage:
+  ```
+  show pfcwd stats
+  ```
+
+Go Back To [Beginning of the document](#) or [Beginning of this section](#pfc-watchdog-commands)
+
+## Platform Component Firmware
+
+### Platform Component Firmware show commands
+
+**show platform firmware**
+
+This command displays platform components firmware status information.
+
+- Usage:
+```bash
+show platform firmware
+```
+
+- Example:
+```bash
+root@sonic:/home/admin# show platform firmware
+Chassis    Module    Component    Version                  Description
+---------  --------  -----------  -----------------------  ---------------------------------------
+Chassis1   N/A       BIOS         0ACLH004_02.02.007_9600  BIOS - Basic Input/Output System
+                     CPLD         5.3.3.1                  CPLD - includes all CPLDs in the switch
+```
+
+### Platform Component Firmware config commands
+
+**config platform firmware install**
+
+This command is used to install a platform component firmware.  
+Both modular and non modular chassis platforms are supported.
+
+- Usage:
+```bash
+config platform firmware install chassis component <component_name> fw <fw_path> [-y|--yes]
+config platform firmware install module <module_name> component <component_name> fw <fw_path> [-y|--yes]
+```
+
+- Example:
+```bash
+root@sonic:/home/admin# config platform firmware install chassis component BIOS fw /etc/mlnx/fw/sn3800/chassis1/bios.bin
+New firmware will be installed, continue? [y/N]: y
+Installing firmware:
+    /etc/mlnx/fw/sn3800/chassis1/bios.bin
+
+root@sonic:/home/admin# config platform firmware install module Module1 component BIOS fw http://mellanox.com/fw/sn3800/module1/bios.bin
+New firmware will be installed, continue? [y/N]: y
+Downloading firmware:
+    [##################################################]  100%
+Installing firmware:
+    /tmp/bios.bin
+```
+
+Supported options:
+1. -y|--yes - automatic yes to prompts. Assume "yes" as answer to all prompts and run non-interactively
+
+**config platform firmware update**
+
+This command is used for automatic FW update of all available platform components.  
+Both modular and non modular chassis platforms are supported.
+
+Automatic FW update requires `platform_components.json` to be created and placed at:  
+sonic-buildimage/device/<platform_name>/<onie_platform>/platform_components.json
+
+Example:
+1. Non modular chassis platform
+```json
+{
+    "chassis": {
+        "Chassis1": {
+            "component": {
+                "BIOS": {
+                    "firmware": "/etc/<platform_name>/fw/<onie_platform>/chassis1/bios.bin",
+                    "version": "0ACLH003_02.02.010",
+                    "info": "Cold reboot is required"
+                },
+                "CPLD": {
+                    "firmware": "/etc/<platform_name>/fw/<onie_platform>/chassis1/cpld.bin",
+                    "version": "10",
+                    "info": "Power cycle is required"
+                },
+                "FPGA": {
+                    "firmware": "/etc/<platform_name>/fw/<onie_platform>/chassis1/fpga.bin",
+                    "version": "5",
+                    "info": "Power cycle is required"
+                }
+            }
+        }
+    }
+}
+```
+
+2. Modular chassis platform
+```json
+{
+    "chassis": {
+        "Chassis1": {
+            "component": {
+                "BIOS": {
+                    "firmware": "/etc/<platform_name>/fw/<onie_platform>/chassis1/bios.bin",
+                    "version": "0ACLH003_02.02.010",
+                    "info": "Cold reboot is required"
+                },
+                "CPLD": {
+                    "firmware": "/etc/<platform_name>/fw/<onie_platform>/chassis1/cpld.bin",
+                    "version": "10",
+                    "info": "Power cycle is required"
+                },
+                "FPGA": {
+                    "firmware": "/etc/<platform_name>/fw/<onie_platform>/chassis1/fpga.bin",
+                    "version": "5",
+                    "info": "Power cycle is required"
+                }
+            }
+        }
+    },
+    "module": {
+        "Module1": {
+            "component": {
+                "CPLD": {
+                    "firmware": "/etc/<platform_name>/fw/<onie_platform>/module1/cpld.bin",
+                    "version": "10",
+                    "info": "Power cycle is required"
+                },
+                "FPGA": {
+                    "firmware": "/etc/<platform_name>/fw/<onie_platform>/module1/fpga.bin",
+                    "version": "5",
+                    "info": "Power cycle is required"
+                }
+            }
+        }
+    }
+}
+```
+
+Note: FW update will be skipped if component definition is not provided (e.g., 'BIOS': { })
+
+- Usage:
+```bash
+config platform firmware update [-y|--yes] [-f|--force] [-i|--image=current|next]
+```
+
+- Example:
+```bash
+root@sonic:/home/admin# config platform firmware update
+Chassis    Module    Component    Firmware                               Version                                            Status              Info
+---------  --------  -----------  -------------------------------------  -------------------------------------------------  ------------------  -----------------------
+Chassis1   N/A       BIOS         /etc/mlnx/fw/sn3800/chassis1/bios.bin  0ACLH004_02.02.007_9600 / 0ACLH004_02.02.007_9600  up-to-date          Cold reboot is required
+                     CPLD         /etc/mlnx/fw/sn3800/chassis1/cpld.bin  5.3.3.1 / 5.3.3.2                                  update is required  Power cycle is required
+New firmware will be installed, continue? [y/N]: y
+
+Summary:
+
+Chassis    Module    Component    Status
+---------  --------  -----------  ----------
+Chassis1   N/A       BIOS         up-to-date
+                     CPLD         success
+```
+
+Supported options:
+1. -y|--yes - automatic yes to prompts. Assume "yes" as answer to all prompts and run non-interactively
+2. -f|--force - install FW regardless the current version
+3. -i|--image - update FW using current/next SONiC image
+
+Note: the default option is --image=current (current/next values are taken from `sonic_installer list`)
+
+Go Back To [Beginning of the document](#) or [Beginning of this section](#platform-component-firmware)
 
 
 ## Platform Specific Commands
@@ -5314,5 +5632,4 @@ This command displays the routing policy that takes precedence over the other ro
     Action:
       Exit routemap
   ```
-
 Go Back To [Beginning of the document](#) or [Beginning of this section](#quagga-bgp-show-commands)
