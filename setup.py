@@ -53,7 +53,7 @@ setup(
     ],
     package_data={
         'show': ['aliases.ini'],
-        'sonic-utilities-tests': ['acl_input/*'],
+        'sonic-utilities-tests': ['acl_input/*', 'filter_fdb_input/*']
     },
     scripts=[
         'scripts/aclshow',
@@ -70,6 +70,7 @@ setup(
         'scripts/fast-reboot-dump.py',
         'scripts/fdbclear',
         'scripts/fdbshow',
+        'scripts/filter_fdb_entries.py',
         'scripts/generate_dump',
         'scripts/intfutil',
         'scripts/lldpshow',
