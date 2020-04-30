@@ -63,7 +63,9 @@ function disable_watchdog()
         fi
     elif isMLNX; then
         debug "Calling MLNX WD disable"
-        # call watchdog api for mlnx
+        if [[ -x /usr/bin/hw-management-wd.sh  ]]; then
+            /usr/bin/hw-management-wd.sh stop
+        fi
     else
         if isArista; then
             debug "Calling Arista WD disable"
@@ -84,7 +86,9 @@ function enable_watchdog()
         fi
     elif isMLNX; then
         debug "Calling MLNX WD enable"
-        # call watchdog api for mlnx
+        if [[ -x /usr/bin/hw-management-wd.sh  ]]; then
+            /usr/bin/hw-management-wd.sh start 180
+        fi
     else
         if isArista; then
             debug "Calling Arista WD enable"
