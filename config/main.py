@@ -112,27 +112,6 @@ def _get_option(ctx,args,incomplete):
             all_mode_options = [str(c) for c in breakout_mode_options if incomplete in c]
             return all_mode_options
 
-
-def shutdown_interfaces(ctx, del_intf_dict):
-    """ shut down all the interfaces before deletion """
-    for intf in del_intf_dict.keys():
-        config_db = ctx.obj['config_db']
-        if get_interface_naming_mode() == "alias":
-            interface_name = interface_alias_to_name(intf)
-            if intf is None:
-                click.echo("[ERROR] interface name is None!")
-                return False
-        if interface_name_is_valid(intf) is False:
-            click.echo("[ERROR] Interface name is invalid. Please enter a valid interface name!!")
-            return False
-        if intf.startswith(PORT_STR):
-            config_db.mod_entry("PORT", intf, {"admin_status": "down"})
-        else:
-            click.secho("[ERROR] Could not get the correct interface name, exiting", fg='red')
-            return False
-    return True
-
-
 def _validate_interface_mode(ctx, BREAKOUT_CFG_FILE, interface_name, target_brkout_mode, cur_brkout_mode):
     """ Validate Parent interface and user selected mode before starting deletetion or addition process """
     breakout_file_input = readJsonFile(BREAKOUT_CFG_FILE)["interfaces"]
@@ -1233,7 +1212,7 @@ def add_vlan_member(ctx, vid, interface_name, untagged):
     for entry in interface_table:
         if (interface_name == entry[0]):
             ctx.fail("{} is a L3 interface!".format(interface_name))
-            
+
     members.append(interface_name)
     vlan['members'] = members
     db.set_entry('VLAN', vlan_name, vlan)
@@ -1636,9 +1615,6 @@ def speed(ctx, interface_name, interface_speed, verbose):
         command += " -vv"
     run_command(command, display_cmd=verbose)
 
-
-
-
 #
 # 'breakout' subcommand
 #
@@ -1667,7 +1643,7 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
 
     # Get current breakout mode
     cur_brkout_dict = config_db.get_table('BREAKOUT_CFG')
-    cur_brkout_mode = cur_brkout_mode = cur_brkout_dict[interface_name]["brkout_mode"]
+    cur_brkout_mode = cur_brkout_dict[interface_name]["brkout_mode"]
 
     # Validate Interface and Breakout mode
     if not _validate_interface_mode(ctx, BREAKOUT_CFG_FILE, interface_name, mode, cur_brkout_mode):
@@ -1677,19 +1653,12 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
     # Get list of interfaces to be deleted
     del_ports = get_child_ports(interface_name, cur_brkout_mode, BREAKOUT_CFG_FILE)
     del_intf_dict = {intf: del_ports[intf]["speed"] for intf in del_ports}
-    del_intf_dict = {intf: del_ports[intf]["speed"] for intf in del_ports}
 
     if del_intf_dict:
-        """ shut down all the interface before deletion """
-        ret = shutdown_interfaces(ctx, del_intf_dict)
-        if not ret:
-            raise click.Abort()
         click.echo("\nPorts to be deleted : \n {}".format(json.dumps(del_intf_dict, indent=4)))
-
     else:
         click.secho("[ERROR] del_intf_dict is None! No interfaces are there to be deleted", fg='red')
         raise click.Abort()
-
 
     """ Interface Addition Logic """
     # Get list of interfaces to be added
@@ -1711,6 +1680,11 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
     # Remove the interface which remains unchanged from both del_intf_dict and add_intf_dict
     map(del_intf_dict.pop, matched_item)
     map(add_intf_dict.pop, matched_item)
+
+    # validate all del_ports before calling breakOutPort
+    for intf in del_intf_dict.keys():
+        if not interface_name_is_valid(intf):
+            raise Exception("Interface name {} is invalid")
 
     click.secho("\nFinal list of ports to be deleted : \n {} \nFinal list of ports to be added :  \n {}".format(json.dumps(del_intf_dict, indent=4), json.dumps(add_intf_dict, indent=4), fg='green', blink=True))
     if len(add_intf_dict.keys()) == 0:
