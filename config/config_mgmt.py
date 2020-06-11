@@ -549,12 +549,15 @@ class configMgmt():
             # if output is dict, delete keys from config
             if isinstance(inp, dict):
                 for key in diff:
-                    #print(key)
                     # make sure keys from diff are present in inp but not in outp
                     # then delete it.
                     if key in inp and key not in outp:
-                        # assign key to None(null), redis will delete entire key
-                        config[key] = None
+                        if type(inp[key]) == list:
+                            # assign current lists as empty.
+                            config[key] = []
+                        else:
+                            # assign key to None(null), redis will delete entire key
+                            config[key] = None
                     else:
                         # log such keys
                         print("Diff: Probably wrong key: {}".format(key))
