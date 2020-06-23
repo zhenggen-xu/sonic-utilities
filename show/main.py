@@ -21,12 +21,14 @@ from swsssdk import SonicV2Connector
 
 import mlnx
 from collections import OrderedDict
+from portconfig import get_child_ports
 
 # Global Variable
 PLATFORM_ROOT_PATH = "/usr/share/sonic/device"
 PLATFORM_JSON = 'platform.json'
 HWSKU_JSON = 'hwsku.json'
 SONIC_CFGGEN_PATH = '/usr/local/bin/sonic-cfggen'
+PORT_STR = "Ethernet"
 
 VLAN_SUB_INTERFACE_SEPARATOR = '.'
 
@@ -838,17 +840,39 @@ def breakout(ctx):
         hwsku = hw_info_dict['hwsku']
 
         # Get port capability from platform and hwsku related files
-        platformDict = readJsonFile("{}/{}/{}".format(PLATFORM_ROOT_PATH, platform, PLATFORM_JSON))['interfaces']
+        platformFile = "{}/{}/{}".format(PLATFORM_ROOT_PATH, platform, PLATFORM_JSON)
+        platformDict = readJsonFile(platformFile)['interfaces']
         hwskuDict = readJsonFile("{}/{}/{}/{}".format(PLATFORM_ROOT_PATH, platform, hwsku, HWSKU_JSON))['interfaces']
 
         if not platformDict or not hwskuDict:
             click.echo("Can not load port config from {} or {} file".format(PLATFORM_JSON, HWSKU_JSON))
             raise click.Abort()
 
-        # Update 'hwskuDict' to 'PlatformDict'
         for port_name in platformDict.keys():
+            curBrkout_mode = curBrkout_tbl[port_name]["brkout_mode"]
+
+            # Update deafult breakout mode and current breakout mode to platformDict
             platformDict[port_name].update(hwskuDict[port_name])
-            platformDict[port_name].update(curBrkout_tbl[port_name])
+            platformDict[port_name]["Current Breakout Mode"] = curBrkout_mode
+
+            # List all the child ports if present
+            child_portDict = get_child_ports(port_name,curBrkout_mode, platformFile)
+            if not child_portDict:
+                click.echo("Can not find ports from {} file ".format(PLATFORM_JSON))
+                raise click.Abort()
+
+            child_ports = natsorted(child_portDict.keys())
+
+            children, speeds = [], []
+            # Update portname and speed of child ports if present
+            for port in child_ports:
+                speed = config_db.get_entry('PORT', port).get('speed')
+                if speed is not None:
+                    speeds.append(str(int(speed)/1000)+'G')
+                    children.append(port)
+
+            platformDict[port_name]["child ports"] = ",".join(children)
+            platformDict[port_name]["child port speeds"] = ",".join(speeds)
 
         # Sorted keys by name in natural sort Order for human readability
         parsed = OrderedDict((k, platformDict[k]) for k in natsorted(platformDict.keys()))
