@@ -31,7 +31,7 @@ except ImportError as e:
 YANG_DIR = "/usr/local/yang-models"
 CONFIG_DB_JSON_FILE = '/etc/sonic/confib_db.json'
 # TODO: Find a place for it on sonic switch.
-DEFAULT_CONFIG_DB_JSON_FILE = '/etc/sonic/default_config_db.json'
+DEFAULT_CONFIG_DB_JSON_FILE = '/etc/sonic/port_breakout_config_db.json'
 
 # Class to handle config managment for SONIC, this class will use PLY to verify
 # config for the commands which are capable of change in config DB.
