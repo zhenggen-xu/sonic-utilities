@@ -433,21 +433,6 @@ class ConfigMgmtDPB(ConfigMgmt):
         return configToLoad, True
 
     """
-    Validate current Data Tree
-    """
-    def validateConfigData(self):
-
-        try:
-            self.sy.validate_data_tree()
-        except Exception as e:
-            self.sysLog(msg='Data Validation Failed')
-            return False
-
-        print('Data Validation successful')
-        self.sysLog(msg='Data Validation successful')
-        return True
-
-    """
     Based on the list of Ports, create a dict to shutdown port, update Config DB.
     Input: [] of ports.
     """

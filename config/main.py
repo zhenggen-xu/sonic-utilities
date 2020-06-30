@@ -668,18 +668,18 @@ class ConfigDbLock():
             # expire call.
             if self.client.hsetnx(self.lockName, "PID", self.pid):
                 self.client.expire(self.lockName, self.timeout)
-                print(":::Lock Acquired:::")
+                log_debug(":::Lock Acquired:::")
             # if lock exists but expire timer not running, run expire time and
             # abort.
             elif not self.client.ttl(self.lockName):
                 self.client.expire(self.lockName, self.timeout)
-                print(":::Can not acquire lock, Reset Timer & Abort:::");
+                click.echo(":::Can not acquire lock, Reset Timer & Abort:::");
                 sys.exit(1)
             else:
-                print(":::Can not acquire lock, Abort:::");
+                click.echo(":::Can not acquire lock, Abort:::");
                 sys.exit(1)
         except Exception as e:
-            print(":::Exception: {}:::".format(e))
+            click.echo(":::Exception: {}:::".format(e))
             sys.exit(1)
         return
 
@@ -688,7 +688,7 @@ class ConfigDbLock():
             # Try to set lock first
             if self.client.hsetnx(self.lockName, "PID", self.pid):
                 self.client.expire(self.lockName, self.timeout)
-                print(":::Lock Reacquired:::")
+                log_debug(":::Lock Reacquired:::")
             # if lock exists, check who owns it
             else:
                 p = self.client.pipeline(True)
@@ -697,18 +697,18 @@ class ConfigDbLock():
                 # if current process holding then extend the timer
                 if p.hget(self.lockName, "PID") == str(self.pid):
                     self.client.expire(self.lockName, self.timeout)
-                    print(":::Lock Timer Extended:::");
+                    log_debug(":::Lock Timer Extended:::");
                     p.unwatch()
                     return
                 else:
                     # some other process is holding the lock.
-                    print(":::Can not acquire lock LOCK PID: {} and self.pid:{}:::".\
+                    click.echo(":::Can not acquire lock LOCK PID: {} and self.pid:{}:::".\
                         format(p.hget(self.lockName, "PID"), self.pid))
                     p.unwatch()
                     sys.exit(1)
 
         except Exception as e:
-            print(":::Exception: {}:::".format(e))
+            click.echo(":::Exception: {}:::".format(e))
             sys.exit(1)
         return
 
@@ -722,15 +722,15 @@ class ConfigDbLock():
                 p.multi()
                 p.delete(self.lockName)
                 p.execute()
-                print(":::Lock Released:::");
+                log_debug(":::Lock Released:::");
                 return
             else:
                 # some other process s holding the lock.
-                print(":::Lock PID: {} and self.pid:{}:::".\
+                log_debug(":::Lock PID: {} and self.pid:{}:::".\
                     format(p.hget(self.lockName, "PID"), self.pid))
             p.unwatch()
         except Exception as e:
-            print("Exception: {}".format(e))
+            log_error("Exception: {}".format(e))
         return
 
     def __del__(self):
