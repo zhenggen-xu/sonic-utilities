@@ -614,7 +614,7 @@ class AclLoader(object):
                     for service in services[1:]:
                         data.append(["", "", service, "", ""])
             else:
-                if not val["ports"]:
+                if not val.get("ports"):
                     data.append([key, val["type"], "", val["policy_desc"], stage])
                 else:
                     ports = natsorted(val["ports"])
