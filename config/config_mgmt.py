@@ -36,18 +36,17 @@ DEFAULT_CONFIG_DB_JSON_FILE = '/etc/sonic/port_breakout_config_db.json'
 # Class to handle config managment for SONIC, this class will use PLY to verify
 # config for the commands which are capable of change in config DB.
 
-class configMgmt():
+class ConfigMgmt():
 
-    def __init__(self, source="configDB", debug=False, allowExtraTables=True):
+    def __init__(self, source="configDB", debug=False, allowTablesWithOutYang=True):
 
         try:
             self.configdbJsonIn = None
             self.configdbJsonOut = None
-            self.allowExtraTables = allowExtraTables
-            self.oidKey = 'ASIC_STATE:SAI_OBJECT_TYPE_PORT:oid:0x'
+            self.allowTablesWithOutYang = allowTablesWithOutYang
 
             # logging vars
-            self.SYSLOG_IDENTIFIER = "configMgmt"
+            self.SYSLOG_IDENTIFIER = "ConfigMgmt"
             self.DEBUG = debug
 
             self.sy = sonic_yang.sonic_yang(YANG_DIR, debug=debug)
@@ -60,17 +59,53 @@ class configMgmt():
             else:
                 self.readConfigDBJson(source)
             # this will crop config, xlate and load.
-            self.sy.load_data(self.configdbJsonIn, self.allowExtraTables)
+            self.loadData(self.configdbJsonIn)
 
         except Exception as e:
             print(e)
-            raise(Exception('configMgmt Class creation failed'))
+            raise(Exception('ConfigMgmt Class creation failed'))
 
         return
 
     def __del__(self):
         pass
 
+    """
+    Return tables loaded in config for which YANG model does not exist.
+    """
+    def tablesWithOutYang(self):
+
+        return self.sy.tablesWithOutYang
+
+    """
+    Explicit function to load config data in Yang Data Tree
+    """
+    def loadData(self, configdbJson):
+        self.sy.load_data(configdbJson)
+        # Raise if tables without YANG models are not allowed but exist.
+        if not self.allowTablesWithOutYang and len(self.sy.tablesWithOutYang):
+            raise Exception('Config has tables without YANG models')
+
+        return
+
+    """
+    Validate current Data Tree
+    """
+    def validateConfigData(self):
+
+        try:
+            self.sy.validate_data_tree()
+        except Exception as e:
+            self.sysLog(msg='Data Validation Failed')
+            return False
+
+        print('Data Validation successful')
+        self.sysLog(msg='Data Validation successful')
+        return True
+
+    """
+    syslog Support
+    """
     def sysLog(self, debug=syslog.LOG_INFO, msg=None):
 
         # log debug only if enabled
@@ -125,6 +160,30 @@ class configMgmt():
         configdb.mod_config(FormatConverter.output_to_db(data))
 
         return
+
+# End of Class ConfigMgmt
+
+"""
+    Config MGMT class for Dynamic Port Breakout(DPB).
+    This is derived from ConfigMgmt.
+"""
+class ConfigMgmtDPB(ConfigMgmt):
+
+    def __init__(self, source="configDB", debug=False, allowTablesWithOutYang=True):
+
+        try:
+            ConfigMgmt.__init__(self, source=source, debug=debug, \
+                allowTablesWithOutYang=allowTablesWithOutYang)
+            self.oidKey = 'ASIC_STATE:SAI_OBJECT_TYPE_PORT:oid:0x'
+
+        except Exception as e:
+            print(e)
+            raise(Exception('ConfigMgmtDPB Class creation failed'))
+
+        return
+
+    def __del__(self):
+        pass
 
     """
       Check if a key exists in ASIC DB or not.
@@ -359,7 +418,7 @@ class configMgmt():
 
             # create a tree with merged config and validate, if validation is
             # sucessful, then configdbJsonOut contains final and valid config.
-            self.sy.load_data(self.configdbJsonOut, self.allowExtraTables)
+            self.loadData(self.configdbJsonOut)
             if self.validateConfigData()==False:
                 return configToLoad, False
 
@@ -449,54 +508,74 @@ class configMgmt():
         return D1
 
     """
+    search Relevant Keys in Config using DFS, This function is mainly
+    used to search port related config in Default ConfigDbJson file.
+    In: Config to be searched
+    skeys: Keys to be searched in In Config i.e. search Keys.
+    Out: Contains the search result
+    """
+    def searchKeysInConfig(self, In, Out, skeys):
+
+        found = False
+        if isinstance(In, dict):
+            for key in In.keys():
+                #print("key:" + key)
+                for skey in skeys:
+                    # pattern is very specific to current primary keys in
+                    # config DB, may need to be updated later.
+                    pattern = '^' + skey + '\|' + '|' + skey + '$' + \
+                        '|' + '^' + skey + '$'
+                    #print(pattern)
+                    reg = re.compile(pattern)
+                    #print(reg)
+                    if reg.search(key):
+                        # In primary key, only 1 match can be found, so return
+                        # print("Added key:" + key)
+                        Out[key] = In[key]
+                        found = True
+                        break
+                # Put the key in Out by default, if not added already.
+                # Remove later, if subelements does not contain any port.
+                if Out.get(key) is None:
+                    Out[key] = type(In[key])()
+                    if self.searchKeysInConfig(In[key], Out[key], skeys) == False:
+                        del Out[key]
+                    else:
+                        found = True
+
+        elif isinstance(In, list):
+            for skey in skeys:
+                if skey in In:
+                    found = True
+                    Out.append(skey)
+                    #print("Added in list:" + port)
+
+        else:
+            # nothing for other keys
+            pass
+
+        return found
+
+    """
+    This function returns the relavant keys in Input Config.
+    For Example: All Ports related Config in Config DB.
+    """
+    def configWithKeys(self, configIn=dict(), keys=list()):
+
+        configOut = dict()
+        try:
+            if len(configIn) and len(keys):
+                self.searchKeysInConfig(configIn, configOut, skeys=keys)
+        except Exception as e:
+            print("configWithKeys Failed, Error: {}".format(str(e)))
+            raise e
+
+        return configOut
+
+    """
     Create a defConfig for given Ports from Default Config File.
     """
     def getDefaultConfig(self, ports=list()):
-
-        """
-        create Default Config using DFS for all ports
-        """
-        def createDefConfig(In, Out, ports):
-
-            found = False
-            if isinstance(In, dict):
-                for key in In.keys():
-                    #print("key:" + key)
-                    for port in ports:
-                        # pattern is very specific to current primary keys in
-                        # config DB, may need to be updated later.
-                        pattern = '^' + port + '\|' + '|' + port + '$' + \
-                            '|' + '^' + port + '$'
-                        #print(pattern)
-                        reg = re.compile(pattern)
-                        #print(reg)
-                        if reg.search(key):
-                            # In primary key, only 1 match can be found, so return
-                            # print("Added key:" + key)
-                            Out[key] = In[key]
-                            found = True
-                            break
-                    # Put the key in Out by default, if not added already.
-                    # Remove later, if subelements does not contain any port.
-                    if Out.get(key) is None:
-                        Out[key] = type(In[key])()
-                        if createDefConfig(In[key], Out[key], ports) == False:
-                            del Out[key]
-                        else:
-                            found = True
-
-            elif isinstance(In, list):
-                for port in ports:
-                    if port in In:
-                        found = True
-                        Out.append(port)
-                        #print("Added in list:" + port)
-
-            else:
-                # nothing for other keys
-                pass
-
-            return found
 
         # function code
         try:
@@ -504,10 +583,9 @@ class configMgmt():
             defConfigIn = readJsonFile(DEFAULT_CONFIG_DB_JSON_FILE)
             #print(defConfigIn)
             defConfigOut = dict()
-            createDefConfig(defConfigIn, defConfigOut, ports)
+            self.searchKeysInConfig(defConfigIn, defConfigOut, skeys=ports)
         except Exception as e:
-            print("Get Default Config Failed")
-            print(e)
+            print("getDefaultConfig Failed, Error: {}".format(str(e)))
             raise e
 
         return defConfigOut
@@ -520,13 +598,12 @@ class configMgmt():
             # Get the Diff
             print('Generate Final Config to write in DB')
             configDBdiff = self.diffJson()
-
             # Process diff and create Config which can be updated in Config DB
             configToLoad = self.createConfigToLoad(configDBdiff, \
                 self.configdbJsonIn, self.configdbJsonOut)
 
         except Exception as e:
-            print("Update to Config DB Failed")
+            print("Config Diff Generation failed")
             print(e)
             raise e
 
@@ -657,7 +734,7 @@ class configMgmt():
         from jsondiff import diff
         return diff(self.configdbJsonIn, self.configdbJsonOut, syntax='symmetric')
 
-# end of config_mgmt class
+# end of class ConfigMgmtDPB
 
 """
     Test Functions:
@@ -774,7 +851,7 @@ def testRun_Delete_Add_Port(cmode, nmode, loadDef):
     # TODO: Verify config in Config DB  after writing to config DB.
     print('Test Run Break Out Ports')
     try:
-        cm = configMgmt('configDB', debug=True)
+        cm = ConfigMgmtDPB(source='configDB', debug=True)
 
         delPorts = delPortDict[cmode]
         addPorts = delPortDict[nmode]

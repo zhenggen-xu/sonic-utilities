@@ -16,7 +16,7 @@ import ipaddress
 from swsssdk import ConfigDBConnector
 from swsssdk import SonicV2Connector
 from minigraph import parse_device_desc_xml
-from config_mgmt import configMgmt
+from config_mgmt import ConfigMgmt, ConfigMgmtDPB
 
 import aaa
 import mlnx
@@ -144,16 +144,36 @@ def _validate_interface_mode(ctx, BREAKOUT_CFG_FILE, interface_name, target_brko
         sys.exit(0)
     return True
 
-def load_configMgmt(verbose):
+def load_ConfigMgmt(verbose):
     """ Load config for the commands which are capable of change in config DB. """
     try:
-        # TODO: set allowExtraTables to False, i.e we should have yang models for
-        # each table in Config. [TODO: Create Yang model for each Table]
-        # cm = configMgmt(debug=verbose, allowExtraTables=False)
-        cm = configMgmt(debug=verbose, allowExtraTables=True)
+        cm = ConfigMgmtDPB(debug=verbose)
         return cm
     except Exception as e:
         raise Exception("Failed to load the config. Error: {}".format(str(e)))
+
+"""
+Funtion to warn user about extra tables while Dynamic Port Breakout(DPB).
+confirm: re-confirm from user to proceed.
+Config Tables Without Yang model considered extra tables.
+cm =  instance of config MGMT class.
+"""
+def breakout_warnUser_extraTables(cm, final_delPorts, confirm=True):
+
+    try:
+        # check if any extra tables exist
+        eTables = cm.tablesWithOutYang()
+        if len(eTables):
+            # find relavent tables in extra tables, i.e. one which can have deleted
+            # ports
+            tables = cm.configWithKeys(configIn=eTables, keys=final_delPorts)
+            click.secho("Below Config can not be verified, It may cause harm "\
+                "to the system\n {}".format(json.dumps(tables, indent=2)))
+            click.confirm('Do you wish to Continue?', abort=True)
+    except Exception as e:
+        raise Exception("Failed in breakout_warnUser_extraTables. Error: {}".format(str(e)))
+
+    return
 
 def breakout_Ports(cm, delPorts=list(), addPorts=list(), portJson=dict(), \
     force=False, loadDefConfig=True, verbose=False):
@@ -755,7 +775,7 @@ def load(filename, yes, disable_validation):
     # Verify config before config load
     if not disable_validation:
         try:
-            cm = configMgmt(source=filename)
+            cm = ConfigMgmt(source=filename)
             if cm.validateConfigData()==False:
                 raise(Exception('Config Validation Failed'))
         except Exception as e:
@@ -792,7 +812,7 @@ def reload(filename, yes, load_sysinfo, disable_validation):
     # Verify config before stoping service
     if not disable_validation:
         try:
-            cm = configMgmt(source=filename)
+            cm = ConfigMgmt(source=filename)
             if cm.validateConfigData()==False:
                 raise(Exception('Config Validation Failed'))
         except Exception as e:
@@ -1809,11 +1829,14 @@ def breakout(ctx, interface_name, mode, verbose, force_remove_dependencies, load
     # Start Interation with Dy Port BreakOut Config Mgmt
     try:
         """ Load config for the commands which are capable of change in config DB """
-        cm = load_configMgmt(verbose)
+        cm = load_ConfigMgmt(verbose)
 
-        """ Delete all ports if forced else print dependencies using configMgmt API """
+        """ Delete all ports if forced else print dependencies using ConfigMgmt API """
         final_delPorts = [intf for intf in del_intf_dict.keys()]
-        """ Add ports with its attributes using configMgmt API """
+        """ Warn user if tables without yang models exist and have final_delPorts """
+        breakout_warnUser_extraTables(cm, final_delPorts, confirm=True)
+        # prompt
+        """ Add ports with its attributes using ConfigMgmt API """
         final_addPorts = [intf for intf in port_dict.keys()]
         portJson = dict(); portJson['PORT'] = port_dict
         # breakout_Ports will abort operation on failure, So no need to check return
