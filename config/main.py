@@ -658,11 +658,9 @@ class ConfigDbLock():
         self.timeout = 10
         self.pid = os.getpid()
         self.client = None
-
-        self._acquireLock()
         return
 
-    def _acquireLock(self):
+    def acquireLock(self):
         try:
             # connect to db
             db_kwargs = dict()
@@ -728,15 +726,13 @@ class ConfigDbLock():
                 p.multi()
                 p.delete(self.lockName)
                 p.execute()
-                log_debug(":::Lock Released:::");
                 return
             else:
-                # some other process s holding the lock.
-                log_debug(":::Lock PID: {} and self.pid:{}:::".\
-                    format(p.hget(self.lockName, "PID"), self.pid))
+                # some other process is holding the lock. Do nothing.
+                pass
             p.unwatch()
         except Exception as e:
-            log_error("Exception: {}".format(e))
+            raise e
         return
 
     def __del__(self):
@@ -751,6 +747,10 @@ def config():
     """SONiC command line - 'config' command"""
     if os.geteuid() != 0:
         exit("Root privileges are required for this operation")
+    # Take lock only when config command is executed, to avoid taking lock for
+    # TABs and for -h. Note ? is treated as input python clicks
+    cdblock.acquireLock()
+
 config.add_command(aaa.aaa)
 config.add_command(aaa.tacacs)
 # === Add NAT Configuration ==========
