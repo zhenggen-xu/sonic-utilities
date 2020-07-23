@@ -163,12 +163,18 @@ def breakout_warnUser_extraTables(cm, final_delPorts, confirm=True):
     try:
         # check if any extra tables exist
         eTables = cm.tablesWithOutYang()
-        if len(eTables):
-            # find relavent tables in extra tables, i.e. one which can have deleted
-            # ports
-            tables = cm.configWithKeys(configIn=eTables, keys=final_delPorts)
-            click.secho("Below Config can not be verified, It may cause harm "\
-                "to the system\n {}".format(json.dumps(tables, indent=2)))
+        if len(eTables) == 0:
+            return
+        # let user know that extra tables exist in config
+        click.secho("Below Table(s) can not be verified using YANG models:")
+        click.secho("{}".format(eTables.keys()))
+        # find relavent tables in extra tables, i.e. one which can have deleted
+        # ports
+        tables = cm.configWithKeys(configIn=eTables, keys=final_delPorts)
+        if len(tables):
+            click.secho("Below Config in Unverified Table(s) may harm the system")
+            click.secho("{}".format(json.dumps(tables, indent=2)))
+            # Need to confirm if extra Tables have any deleted ports.
             click.confirm('Do you wish to Continue?', abort=True)
     except Exception as e:
         raise Exception("Failed in breakout_warnUser_extraTables. Error: {}".format(str(e)))
@@ -671,7 +677,7 @@ class ConfigDbLock():
                 log_debug(":::Lock Acquired:::")
             # if lock exists but expire timer not running, run expire time and
             # abort.
-            elif not self.client.ttl(self.lockName):
+            elif self.client.ttl(self.lockName) == -1:
                 self.client.expire(self.lockName, self.timeout)
                 click.echo(":::Can not acquire lock, Reset Timer & Abort:::");
                 sys.exit(1)
