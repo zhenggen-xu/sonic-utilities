@@ -1,15 +1,13 @@
-#!/usr/bin/env python
-
-import json
-import sys
-import os
 import argparse
+import json
+import os
+import sys
 import syslog
-import traceback
 import time
+import traceback
 
-from ipaddress import ip_address, ip_network, ip_interface
 from collections import defaultdict
+from ipaddress import ip_address, ip_network, ip_interface
 
 def get_vlan_cidr_map(filename):
     """
@@ -35,7 +33,9 @@ def get_vlan_cidr_map(filename):
                 continue
             vlan, cidr = tuple(vlan_key.split('|'))
             if vlan in config_db_entries["VLAN"]:
-                vlan_cidr[vlan] = ip_interface(cidr).network
+                if vlan not in vlan_cidr:
+                    vlan_cidr[vlan] = {4: ip_address("0.0.0.0".decode()), 6: ip_address("::".decode())}
+                vlan_cidr[vlan][ip_interface(cidr).version] = ip_interface(cidr).network
 
     return vlan_cidr
 
@@ -65,8 +65,9 @@ def get_arp_entries_map(arp_filename, config_db_filename):
                 continue
             table, vlan, ip = tuple(key.split(':'))
             if "NEIGH_TABLE" in table and vlan in vlan_cidr.keys() \
-                and ip_address(ip) in ip_network(vlan_cidr[vlan]) and "neigh" in config.keys():
-                arp_map[config["neigh"].replace(':', '-')] = ""
+                and ip_address(ip) in ip_network(vlan_cidr[vlan][ip_interface(ip).version]) \
+                and "neigh" in config.keys():
+                arp_map[config["neigh"].replace(':', '-').upper()] = ""
 
     return arp_map
 
@@ -94,7 +95,7 @@ def filter_fdb_entries(fdb_filename, arp_filename, config_db_filename, backup_fi
     def filter_fdb_entry(fdb_entry):
         for key, _ in fdb_entry.items():
             if 'FDB_TABLE' in key:
-                return key.split(':')[-1] in arp_map
+                return key.split(':')[-1].upper() in arp_map
 
         # malformed entry, default to False so it will be deleted
         return False
@@ -124,44 +125,33 @@ def file_exists_or_raise(filename):
     if not os.path.exists(filename):
         raise Exception("file '{0}' does not exist".format(filename))
 
-def main():
+def main(argv=sys.argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('-f', '--fdb', type=str, default='/tmp/fdb.json', help='fdb file name')
     parser.add_argument('-a', '--arp', type=str, default='/tmp/arp.json', help='arp file name')
     parser.add_argument('-c', '--config_db', type=str, default='/tmp/config_db.json', help='config db file name')
     parser.add_argument('-b', '--backup_file', type=bool, default=True, help='Back up old fdb entries file')
-    args = parser.parse_args()
+    args = parser.parse_args(argv[1:])
 
     fdb_filename = args.fdb
     arp_filename = args.arp
     config_db_filename = args.config_db
     backup_file = args.backup_file
 
+    res = 0
     try:
+        syslog.openlog('filter_fdb_entries')
         file_exists_or_raise(fdb_filename)
         file_exists_or_raise(arp_filename)
         file_exists_or_raise(config_db_filename)
     except Exception as e:
         syslog.syslog(syslog.LOG_ERR, "Got an exception %s: Traceback: %s" % (str(e), traceback.format_exc()))
-    else:
-        filter_fdb_entries(fdb_filename, arp_filename, config_db_filename, backup_file)
-
-    return 0
-
-if __name__ == '__main__':
-    res = 0
-    try:
-        syslog.openlog('filter_fdb_entries')
-        res = main()
     except KeyboardInterrupt:
         syslog.syslog(syslog.LOG_NOTICE, "SIGINT received. Quitting")
         res = 1
-    except Exception as e:
-        syslog.syslog(syslog.LOG_ERR, "Got an exception %s: Traceback: %s" % (str(e), traceback.format_exc()))
-        res = 2
+    else:
+        filter_fdb_entries(fdb_filename, arp_filename, config_db_filename, backup_file)
     finally:
         syslog.closelog()
-    try:
-        sys.exit(res)
-    except SystemExit:
-        os._exit(res)
+
+    return res
