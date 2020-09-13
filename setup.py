@@ -125,6 +125,7 @@ setup(
     install_requires=[
         'click-default-group',
         'click',
+        'ipaddress',
         'natsort'
     ],
     classifiers=[
